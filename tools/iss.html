@@ -195,7 +195,13 @@
 
   .files { margin-top: 32px; }
   .files h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin: 0 0 12px;
-              display: flex; gap: 8px; }
+              display: flex; align-items: center; gap: 8px; }
+  .files h2 .btn { margin-left: auto; text-transform: none; letter-spacing: 0; }
+  .drop { width: 100%; padding: 22px 16px; border: 1.5px dashed var(--line-strong); border-radius: 12px; background: transparent;
+          color: var(--muted); font-size: 13px; cursor: pointer; }
+  .drop:hover { border-color: var(--accent); color: var(--text); }
+  /* Dragging files over an issue: the files section is where they land */
+  .dropping .files .drop, .dropping .files .tiles { outline: 2px dashed var(--accent); outline-offset: 6px; border-radius: 12px; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
   .tile { display: grid; grid-template-rows: 96px auto; border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
           background: var(--panel); color: var(--text); text-decoration: none; transition: border-color .12s, transform .12s; }
@@ -243,6 +249,10 @@
   .dlg input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
   .dlg .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
   .dlg .error { color: var(--danger); font-size: 13px; min-height: 1.2em; }
+  .dlg .opt { color: var(--faint); font-weight: 400; }
+  #newFound { margin-top: -6px; color: var(--text); overflow-wrap: anywhere; }
+  #newFound:empty { display: none; }
+  #newFound.asking { color: var(--faint); }
   .dlg code { font: 12.5px var(--mono); background: var(--code); padding: 1px 6px; border-radius: 5px; }
   .warn { background: var(--danger-bg); color: var(--danger) !important; border-radius: 9px; padding: 10px 12px; }
 
@@ -292,7 +302,7 @@
         <kbd>/</kbd>
         <span class="div"></span>
         <button class="icon-btn" id="refresh" data-tip="Refresh statuses" aria-label="Refresh statuses"></button>
-        <button class="icon-btn new" id="new" data-tip="New draft (n)" data-tip-end aria-label="New draft"></button>
+        <button class="icon-btn new" id="new" data-tip="New issue (n)" data-tip-end aria-label="New issue"></button>
       </div>
       <div class="tabs" role="tablist" aria-label="Status" id="tabs"></div>
     </div>
@@ -303,13 +313,16 @@
 
 <dialog id="newDialog">
   <form class="dlg" method="dialog" id="newForm">
-    <h2>New draft</h2>
-    <p>Creates a folder with a README. Once it's filed, add the issue, MR or PR link.</p>
+    <h2>New issue</h2>
+    <label class="field"><span>Link <span class="opt">optional</span></span>
+      <input id="newUrl" type="url" placeholder="https://github.com/owner/repo/issues/12" autocomplete="off" spellcheck="false">
+    </label>
+    <p id="newFound"></p>
     <label class="field">Folder name
       <input id="newName" placeholder="gtk-pen-proximity" autocomplete="off" spellcheck="false">
     </label>
     <div class="error" id="newError"></div>
-    <div class="actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="go">Create draft</button></div>
+    <div class="actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" id="newGo" value="go">Create draft</button></div>
   </form>
 </dialog>
 
@@ -321,7 +334,7 @@
       <input id="linkUrl" type="url" placeholder="https://gitlab.gnome.org/GNOME/gtk/-/merge_requests/1234" autocomplete="off" spellcheck="false">
     </label>
     <div class="error" id="linkError"></div>
-    <div class="actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="go">Add link</button></div>
+    <div class="actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" value="go">Add link</button></div>
   </form>
 </dialog>
 
@@ -333,7 +346,7 @@
       <input id="delTyped" autocomplete="off" spellcheck="false">
     </label>
     <div class="error" id="delError"></div>
-    <div class="actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn danger" id="delGo" value="go" disabled>Delete</button></div>
+    <div class="actions"><button class="btn" type="button" data-close>Cancel</button><button class="btn danger" id="delGo" value="go" disabled>Delete</button></div>
   </form>
 </dialog>
 
@@ -344,6 +357,7 @@
 </dialog>
 
 <div class="toast" id="toast" role="status"></div>
+<input type="file" id="filePick" multiple hidden>
 
 <script>
 const TOKEN = "__TOKEN__";
@@ -398,12 +412,14 @@ function toast(text, ic = "check") {
 }
 
 // --- status ---
+// Every tracker's words for "still waiting on someone"; anything else counts as closed
+const OPEN = /^(open|sent|replied|new|unconfirmed|confirmed|assigned|reopened|in_progress|in progress|triaged|incomplete|reported|pending|forwarded|fix pending|under review|rfc|changes requested|awaiting upstream|deferred|needs review \/ ack)$/;
 function kind(i) {
   if (i.hold) return "hold";
   if (i.status === "draft") return "draft";
   if (i.status === "loading") return "loading";
   if (i.status === "?") return "unknown";
-  if (/^(open|sent|new|unconfirmed|assigned|reopened)$/.test(i.status)) return "open";
+  if (OPEN.test(i.status)) return "open";
   return "done";
 }
 const GROUPS = [["open", "Open"], ["draft", "Drafts"], ["hold", "On hold"], ["done", "Closed"]];
@@ -571,7 +587,7 @@ function welcome() {
   if (!issues.length) return `<div class="welcome"><div>
     <span class="mark">${icon("plus")}</span>
     <h2>No issues yet</h2>
-    <p>Each issue is a folder with a README. Start one as a draft, and add the link once it's filed.</p>
+    <p>Each issue is a folder with a README. Start one as a draft and add the link once it's filed, or start from the link of something you've already filed.</p>
     <div class="md"><pre><code>---
 url: https://gitlab.gnome.org/GNOME/gtk/-/issues/1234
 url: https://gitlab.gnome.org/GNOME/gtk/-/merge_requests/5678
@@ -579,7 +595,7 @@ url: https://gitlab.gnome.org/GNOME/gtk/-/merge_requests/5678
 
 # Title</code></pre></div>
     <p>The first link sets the status. Add more for the MR that fixes it, or the issue behind an MR.</p>
-    <button class="btn primary" id="emptyNew">${icon("plus")}<span>New draft</span></button>
+    <button class="btn primary" id="emptyNew">${icon("plus")}<span>New issue</span></button>
   </div></div>`;
   return `<div class="welcome"><div>
     <span class="mark">${icon("search")}</span>
@@ -591,7 +607,8 @@ url: https://gitlab.gnome.org/GNOME/gtk/-/merge_requests/5678
       <span><kbd>e</kbd></span><span>edit the README</span>
       <span><kbd>o</kbd></span><span>open the link</span>
       <span><kbd>l</kbd></span><span>add a link, like the fix MR</span>
-      <span><kbd>n</kbd></span><span>new draft</span>
+      <span><kbd>n</kbd></span><span>new issue, from a link or as a draft</span>
+      <span><kbd>${MOD}</kbd> <kbd>V</kbd></span><span>paste a screenshot into the open issue</span>
     </div></div></div>`;
 }
 
@@ -617,10 +634,6 @@ async function select(name, { scroll = true } = {}) {
 
 function renderDetail() {
   const d = detail, i = issues.find((x) => x.name === d.name) || { status: "draft", where: "", title: d.name, links: [] };
-  const loose = new Set(d.loose);
-  const files = d.files.filter((f) => f !== "README.md");
-  const fileUrl = (f) => `/file/${encodeURIComponent(d.name)}/${f.split("/").map(encodeURIComponent).join("/")}`;
-
   $("main").innerHTML = `<div class="detail">
     <div class="bar">
       <button class="icon-btn back" id="back" aria-label="Back to the list">${icon("back")}</button>
@@ -637,21 +650,86 @@ function renderDetail() {
       <header class="doc-head" id="docHead"></header>
       <div id="body"></div>
     </section>
-    ${files.length ? `<section class="files"><h2>Files <span>${files.length}</span></h2><div class="tiles">${files.map((f) => `
-      <a class="tile" href="${fileUrl(f)}" target="_blank" title="${esc(f)}${loose.has(f) ? " · not in git" : ""}">
-        <span class="thumb">${fileIcon(f) === "image" ? `<img src="${fileUrl(f)}" alt="" loading="lazy">`
-          : `<span>${icon(fileIcon(f))}<div class="ext">${esc((f.includes(".") ? f.split(".").pop() : "file").slice(0, 6))}</div></span>`}</span>
-        <span class="name">${loose.has(f) ? '<i class="loose" title="Not in git"></i>' : ""}<span>${esc(f)}</span></span>
-      </a>`).join("")}</div></section>` : ""}
+    <section class="files" id="files"></section>
   </div>`;
   renderLinks();
   renderBody();
+  renderFiles();
 
   $("back").onclick = () => select(null);
   $("folder").onclick = () => api("/api/open-folder", { name: d.name }).then(() => toast("Opened the folder", "folder"), (e) => toast(e.message, "folder"));
   $("copy").onclick = () => copy(d.path, "Path copied");
   $("del").onclick = askDelete;
 }
+
+function renderFiles() {
+  const d = detail, loose = new Set(d.loose);
+  const files = d.files.filter((f) => f !== "README.md");
+  const fileUrl = (f) => `/file/${encodeURIComponent(d.name)}/${f.split("/").map(encodeURIComponent).join("/")}`;
+  $("files").innerHTML = `<h2>Files ${files.length ? `<span>${files.length}</span>` : ""}
+      <button class="btn sm" id="addFiles">${icon("plus")}<span>Add files</span></button></h2>
+    ${files.length ? `<div class="tiles">${files.map((f) => `
+      <a class="tile" href="${fileUrl(f)}" target="_blank" title="${esc(f)}${loose.has(f) ? " · not in git" : ""}">
+        <span class="thumb">${fileIcon(f) === "image" ? `<img src="${fileUrl(f)}" alt="" loading="lazy">`
+          : `<span>${icon(fileIcon(f))}<div class="ext">${esc((f.includes(".") ? f.split(".").pop() : "file").slice(0, 6))}</div></span>`}</span>
+        <span class="name">${loose.has(f) ? '<i class="loose" title="Not in git"></i>' : ""}<span>${esc(f)}</span></span>
+      </a>`).join("")}</div>`
+      : `<button class="drop" id="dropHint">Drop files here, paste an image, or click to pick some</button>`}`;
+  $("addFiles").onclick = () => $("filePick").click();
+  $("dropHint")?.addEventListener("click", () => $("filePick").click());
+}
+
+// Repros, logs and screenshots go into the issue's folder. While editing, they're
+// also linked at the cursor, the way a pasted screenshot would be on a tracker.
+async function addFiles(files) {
+  const name = detail?.name;
+  if (!name || !files.length) return;
+  const added = [];
+  for (const f of files) {
+    try {
+      const r = await fetch(`/api/upload/${encodeURIComponent(name)}/${encodeURIComponent(f.name)}`,
+                            { method: "POST", headers: { "X-Iss-Token": TOKEN }, body: f });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      added.push(data.file);
+    } catch (e) { toast(`Couldn't add ${f.name}: ${e.message}`, "file"); }
+  }
+  if (!added.length || detail?.name !== name) return;
+  if (editing) {
+    const ta = $("text"), path = (f) => encodeURIComponent(f).replace(/[()]/g, (c) => "%" + c.charCodeAt(0).toString(16));
+    const md = added.map((f) => `${fileIcon(f) === "image" ? "!" : ""}[${f.replace(/[[\]]/g, "")}](${path(f)})`).join("\n");
+    ta.setRangeText(md, ta.selectionStart, ta.selectionEnd, "end");
+    ta.dispatchEvent(new Event("input"));
+  }
+  const fresh = await api("/api/issue/" + encodeURIComponent(name));
+  if (detail?.name !== name) return;
+  detail.files = fresh.files; detail.loose = fresh.loose;
+  renderFiles();
+  toast(added.length === 1 ? "Added " + added[0] : `Added ${added.length} files`, "file");
+}
+$("filePick").onchange = () => { addFiles([...$("filePick").files]); $("filePick").value = ""; };
+
+// Dropping a file anywhere would otherwise make the browser open it instead of the page
+let dragDepth = 0;
+const draggingFiles = (e) => e.dataTransfer?.types.includes("Files");
+document.addEventListener("dragenter", (e) => {
+  if (!draggingFiles(e) || !detail) return;
+  dragDepth++; document.body.classList.add("dropping");
+});
+document.addEventListener("dragleave", (e) => {
+  if (draggingFiles(e) && --dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("dropping"); }
+});
+document.addEventListener("dragover", (e) => { if (draggingFiles(e)) e.preventDefault(); });
+document.addEventListener("drop", (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove("dropping");
+  if (detail && !document.querySelector("dialog[open]")) addFiles([...e.dataTransfer.files]);
+});
+document.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length || !detail || document.querySelector("dialog[open]") || document.body.classList.contains("setting-up")) return;
+  e.preventDefault(); addFiles(files);
+});
 
 // The first link with the status, then the others with their own; redrawn as statuses arrive
 function renderLinks() {
@@ -682,7 +760,6 @@ function openLink() {
   $("linkDialog").showModal(); $("linkUrl").focus();
 }
 $("linkForm").onsubmit = async (e) => {
-  if (e.submitter?.value === "cancel") return;
   e.preventDefault();
   const name = detail.name;
   try {
@@ -779,7 +856,6 @@ function askDelete() {
 }
 
 $("delForm").onsubmit = async (e) => {
-  if (e.submitter?.value === "cancel") return;
   e.preventDefault();
   if ($("delGo").disabled) return;
   const name = detail.name;
@@ -792,17 +868,48 @@ $("delForm").onsubmit = async (e) => {
   } catch (err) { $("delError").textContent = err.message; }
 };
 
+// A pasted link asks its tracker for the title and a folder name, unless one was typed
+let newTitle = "", nameTyped = false, asked = 0, askTimer;
 function openNew() {
-  $("newName").value = ""; $("newError").textContent = "";
-  $("newDialog").showModal(); $("newName").focus();
+  $("newUrl").value = ""; $("newName").value = ""; $("newError").textContent = "";
+  newTitle = ""; nameTyped = false; showFound("");
+  $("newDialog").showModal(); $("newUrl").focus();
+}
+function showFound(text, asking) {
+  $("newFound").textContent = text; $("newFound").classList.toggle("asking", !!asking);
+  $("newGo").textContent = $("newUrl").value.trim() ? "Create" : "Create draft";
+}
+$("newUrl").oninput = () => {
+  clearTimeout(askTimer); asked++; newTitle = ""; $("newError").textContent = ""; showFound("");
+  if (!nameTyped) $("newName").value = "";
+  const url = $("newUrl").value.trim();
+  if (/^https?:\/\/\S+$/.test(url)) askTimer = setTimeout(() => suggest(url), 300);
+};
+$("newName").oninput = () => { nameTyped = !!$("newName").value.trim(); };
+async function suggest(url) {
+  const n = ++asked;
+  showFound("Asking the tracker…", true);
+  try {
+    const r = await api("/api/suggest", { url });
+    if (n !== asked) return;
+    newTitle = r.title; showFound(r.title);
+    if (!nameTyped) $("newName").value = r.name;
+    return r;
+  } catch (err) { if (n === asked) { showFound(""); $("newError").textContent = err.message; } }
 }
 $("newForm").onsubmit = async (e) => {
-  if (e.submitter?.value === "cancel") return;
   e.preventDefault();
+  const url = $("newUrl").value.trim();
+  // Enter right after pasting: wait for the name rather than send none
+  if (url && !$("newName").value.trim()) { clearTimeout(askTimer); if (!(await suggest(url))) return; }
   const name = $("newName").value.trim();
-  try { await api("/api/new", { name }); $("newDialog").close(); await load(false); await select(name); startEdit(); }
-  catch (err) { $("newError").textContent = err.message; }
+  try {
+    await api("/api/new", { name, url, title: url ? newTitle : "" });
+    $("newDialog").close(); await load(false); await select(name);
+    if (!url) startEdit();
+  } catch (err) { $("newError").textContent = err.message; }
 };
+document.querySelectorAll("[data-close]").forEach((b) => { b.onclick = () => b.closest("dialog").close(); });
 
 // --- command palette ---
 let palItems = [], palIndex = 0;
@@ -812,7 +919,7 @@ function openPalette() {
 function renderPalette() {
   const q = $("palInput").value.trim().toLowerCase();
   const cmds = [
-    { t: "New draft", ic: "plus", run: openNew },
+    { t: "New issue", ic: "plus", run: openNew },
     { t: "Refresh all statuses", ic: "refresh", run: () => load(true) },
     ...(detail ? [{ t: "Add a link to this issue", ic: "link", run: openLink }] : []),
     { t: "Change issues folder", ic: "folder", run: () => setupFolder(true) },

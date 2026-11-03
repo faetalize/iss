@@ -4,6 +4,7 @@
   iss                  serve the page on 127.0.0.1 and open it
   iss list             print every issue with its live status
   iss new NAME         start a draft in NAME/README.md
+  iss new URL [NAME]   start one that's already filed, titled and named from its tracker
   iss delete NAME      delete NAME, after typing its name to confirm
   iss link NAME URL    add another issue, MR, PR or patch link to NAME
   iss unlink NAME URL  remove one of NAME's links
@@ -28,6 +29,7 @@ The page can edit and delete files, so the server only listens on
 must carry a token that's new each run.
 """
 
+import html
 import http.server
 import json
 import mimetypes
@@ -41,6 +43,7 @@ import threading
 import urllib.parse
 import urllib.request
 import webbrowser
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -49,7 +52,7 @@ PAGE = Path(__file__).resolve().parent / "iss.html"
 CONFIG = Path(__file__).resolve().parent.parent / ".config.json"
 ROOT = None  # your issues repo, once setup has picked it
 PORT = 8765
-TEMPLATE = "---\nurl:\n---\n\n# {title}\n"
+TEMPLATE = "---\nurl:{url}\n---\n\n# {title}\n"
 NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)+")
 URL = re.compile(r"https?://\S+")
 
@@ -78,27 +81,74 @@ def issues():
         yield readme.parent.name, urls, "true" in fields.get("hold", []), title
 
 
-def where(url):
-    """Short tracker label: owner/repo, GitLab project path, or the host."""
+# Mailing list archives with nothing to ask, so a patch sent there stays "sent"
+MAIL = ("lists.freedesktop.org", "lists.sr.ht")
+ATOM = "{http://www.w3.org/2005/Atom}"
+THREAD = "{http://purl.org/syndication/thread/1.0}"
+
+
+def tracker(url):
+    """Which kind of tracker a url points at, from its shape alone."""
     u = urllib.parse.urlparse(url)
-    path = u.path.split("/-/")[0].strip("/")
     if u.netloc == "github.com":
-        return "/".join(path.split("/")[:2])
+        return "github"
     if "/-/" in u.path:
-        return path
+        return "gitlab"
+    if u.path.endswith("show_bug.cgi"):
+        return "bugzilla"
+    if u.netloc == "bugs.launchpad.net":
+        return "launchpad"
+    if u.netloc == "bugs.debian.org":
+        return "debian"
+    if u.netloc == "todo.sr.ht":
+        return "sourcehut"
+    if u.netloc.startswith("patchwork."):
+        return "patchwork"
+    if u.netloc == "lore.kernel.org":
+        return "lore"
+    if u.netloc in MAIL:
+        return "mail"
+    # Codeberg, or any other Forgejo or Gitea instance
+    if re.match(r"/[^/]+/[^/]+/(issues|pulls)/\d+", u.path):
+        return "forgejo"
+    return None
+
+
+def where(url):
+    """Short tracker label: owner/repo, project path, mailing list, or the host."""
+    u = urllib.parse.urlparse(url)
+    parts = u.path.strip("/").split("/")
+    kind = tracker(url)
+    if kind in ("github", "forgejo", "sourcehut") or u.netloc == "lists.sr.ht":
+        return "/".join(parts[:2])
+    if kind == "gitlab":
+        return u.path.split("/-/")[0].strip("/")
+    if kind == "launchpad" and "/+bug/" in u.path:
+        return u.path.split("/+bug/")[0].strip("/").replace("/+source/", "/")
+    if kind == "patchwork" and parts[0] == "project":
+        return parts[1]
+    if kind == "lore" and parts[0] not in ("all", "r"):
+        return parts[0]
     return u.netloc
 
 
 def link_type(url):
     """What the url points at: an issue, an MR, a PR, or a patch sent by email."""
     u = urllib.parse.urlparse(url)
-    if "/-/merge_requests/" in u.path:
+    kind = tracker(url)
+    if kind == "gitlab" and "/-/merge_requests/" in u.path:
         return "mr"
-    if u.netloc == "github.com" and "/pull/" in u.path:
+    if (kind == "github" and "/pull/" in u.path) or (kind == "forgejo" and "/pulls/" in u.path):
         return "pr"
-    if u.netloc in ("lore.kernel.org", "patchwork.kernel.org", "lists.freedesktop.org"):
+    if kind in ("patchwork", "lore", "mail"):
         return "patch"
     return "issue"
+
+
+def debian_bug(u):
+    """The number in bugs.debian.org/123456 or bugreport.cgi?bug=123456."""
+    m = re.fullmatch(r"/(\d+)/?", u.path) or re.search(r"\bbug=(\d+)", u.query)
+    return m.group(1) if m else ""
 
 
 def ref(url):
@@ -106,50 +156,161 @@ def ref(url):
     u = urllib.parse.urlparse(url)
     if u.path.endswith("show_bug.cgi"):
         return "bug " + urllib.parse.parse_qs(u.query).get("id", [""])[0]
+    if tracker(url) == "debian":
+        return "#" + debian_bug(u) if debian_bug(u) else ""
+    if tracker(url) == "launchpad":
+        # Not the last number, which is the comment's in /+bug/12/comments/3
+        m = re.search(r"/(?:\+bug|bugs)/(\d+)", u.path)
+        return "#" + m.group(1) if m else ""
     m = re.search(r"/(\d+)/?$", u.path)
     if not m or link_type(url) == "patch":
         return ""
     return ("!" if link_type(url) == "mr" else "#") + m.group(1)
 
 
-def fetch(url):
-    """Live state of an issue, MR or PR, or "?" if the tracker isn't known."""
-    u = urllib.parse.urlparse(url)
-    if link_type(url) == "patch":
-        # A patch on a mailing list has no state to ask for
-        return "sent"
+# Each tracker's answer is (status, title, project); the last two name new issues
+
+def ask_github(u):
+    owner, repo, kind, number = u.path.strip("/").split("/")[:4]
+    kind = "pulls" if kind == "pull" else "issues"
+    data = json.loads(subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/{kind}/{number}"],
+        capture_output=True, text=True, check=True, timeout=15).stdout)
+    return "merged" if data.get("merged_at") else data["state"], data["title"], repo
+
+
+def ask_gitlab(u):
+    project, rest = u.path.strip("/").split("/-/")
+    kind, number = rest.split("/")[:2]
+    kind = "merge_requests" if kind == "merge_requests" else "issues"
+    api = f"https://{u.netloc}/api/v4/projects/{urllib.parse.quote(project, safe='')}/{kind}/{number}"
     try:
-        if u.netloc == "github.com":
-            owner, repo, kind, number = u.path.strip("/").split("/")[:4]
-            kind = "pulls" if kind == "pull" else "issues"
-            data = json.loads(subprocess.run(
-                ["gh", "api", f"repos/{owner}/{repo}/{kind}/{number}"],
-                capture_output=True, text=True, check=True, timeout=15).stdout)
-            return "merged" if data.get("merged_at") else data["state"]
-        if "/-/" in u.path:
-            project, rest = u.path.strip("/").split("/-/")
-            kind, number = rest.split("/")[:2]
-            kind = "merge_requests" if kind == "merge_requests" else "issues"
-            api = f"https://{u.netloc}/api/v4/projects/{urllib.parse.quote(project, safe='')}/{kind}/{number}"
-            try:
-                state = get_json(api)["state"]
-            except Exception:
-                # gitlab.gnome.org answers MR API calls with a 406, but serves the page's JSON
-                state = get_json(f"https://{u.netloc}/{project}/-/{kind}/{number}.json?serializer=basic")["state"]
-            return "open" if state == "opened" else state
-        if u.path.endswith("show_bug.cgi"):
-            number = urllib.parse.parse_qs(u.query)["id"][0]
-            bug = get_json(f"https://{u.netloc}/rest/bug/{number}?include_fields=status,resolution")["bugs"][0]
-            return (bug["resolution"] or bug["status"]).lower()
+        data = get_json(api)
+    except Exception:
+        # gitlab.gnome.org answers MR API calls with a 406, but serves the page's JSON
+        data = get_json(f"https://{u.netloc}/{project}/-/{kind}/{number}.json?serializer=basic")
+    return "open" if data["state"] == "opened" else data["state"], data["title"], project.split("/")[-1]
+
+
+def ask_bugzilla(u):
+    number = urllib.parse.parse_qs(u.query)["id"][0]
+    bug = get_json(f"https://{u.netloc}/rest/bug/{number}?include_fields=status,resolution,summary,product")["bugs"][0]
+    return (bug["resolution"] or bug["status"]).lower(), bug["summary"], bug["product"]
+
+
+def ask_forgejo(u):
+    # The issues API answers for PRs too, with whether they merged
+    owner, repo, _, number = u.path.strip("/").split("/")[:4]
+    data = get_json(f"https://{u.netloc}/api/v1/repos/{owner}/{repo}/issues/{number}")
+    merged = (data.get("pull_request") or {}).get("merged")
+    return "merged" if merged else data["state"], data["title"], repo
+
+
+def ask_launchpad(u):
+    """The status in the project the url names, or in the bug's first project for /bugs/N."""
+    number = re.search(r"/(?:\+bug|bugs)/(\d+)", u.path).group(1)
+    bug = get_json(f"https://api.launchpad.net/1.0/bugs/{number}")
+    tasks = get_json(bug["bug_tasks_collection_link"])["entries"]
+    page = lambda task: urllib.parse.urlparse(task["web_link"]).path
+    task = next((t for t in tasks if (u.path.rstrip("/") + "/").startswith(page(t) + "/")), tasks[0])
+    return task["status"].lower(), bug["title"], page(task).split("/+bug/")[0].split("/")[-1]
+
+
+def ask_debian(u):
+    """The Debian BTS only answers SOAP."""
+    number = debian_bug(u)
+    if not number:
+        raise IssError("not a bug number")
+    envelope = ('<?xml version="1.0" encoding="UTF-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+                f'<soap:Body><get_status xmlns="Debbugs/SOAP"><bug>{number}</bug></get_status></soap:Body></soap:Envelope>')
+    reply = ET.fromstring(get("https://bugs.debian.org/cgi-bin/soap.cgi", envelope.encode(), {
+        "Content-Type": "text/xml; charset=utf-8", "SOAPAction": '"Debbugs/SOAP#get_status"'}))
+    field = lambda name: next(e.text or "" for e in reply.iter() if e.tag.rpartition("}")[2] == name)
+    status = field("pending")
+    status = {"pending": "open", "pending-fixed": "fix pending"}.get(status, status)
+    return status, field("subject"), field("source") or field("package").removeprefix("src:")
+
+
+def ask_sourcehut(u):
+    """todo.sr.ht's API needs a token, so this reads the ticket page instead."""
+    page = get(u.geturl()).decode(errors="replace")
+    # RESOLVED is followed by its resolution, like RESOLVED FIXED
+    words = re.search(r'id="status-field"[^>]*>(.*?)</strong>', page, re.S).group(1).split()
+    status = words[0]
+    if status == "RESOLVED" and len(words) > 1 and words[1] != "UNRESOLVED":
+        status = words[1]
+    title = re.search(r"<title>[^:]*:(.*?)&mdash;", page, re.S).group(1)
+    return status.lower().replace("_", " "), html.unescape(title), u.path.strip("/").split("/")[1]
+
+
+def ask_patchwork(u):
+    """Reads the patch page, which upstream Patchwork and freedesktop.org's fork lay out alike;
+    freedesktop's API only gives the state as a number."""
+    page = get(u.geturl()).decode(errors="replace")
+    state = re.search(r"<th>State</th>\s*<td>(.*?)</td>", page, re.S).group(1)
+    title = re.search(r"<h1>(.*?)</h1>", page, re.S).group(1)
+    project = re.search(r'href="/project/([^/"]+)/', page)
+    return (html.unescape(state).strip().lower(), html.unescape(title),
+            project.group(1) if project else u.netloc)
+
+
+def ask_lore(u):
+    """Sent until someone else answers the message, or anything under it in its thread."""
+    msgid_of = lambda href: urllib.parse.unquote(href.rstrip("/").rpartition("/")[2])
+    msgid = next(urllib.parse.unquote(p) for p in u.path.split("/") if "@" in p)
+    feed = ET.fromstring(get(f"https://lore.kernel.org/all/{urllib.parse.quote(msgid, safe='@')}/t.atom"))
+    thread = {}  # msgid: (author, subject, parent msgid)
+    for entry in feed.iter(ATOM + "entry"):
+        parent = entry.find(THREAD + "in-reply-to")
+        thread[msgid_of(entry.find(ATOM + "link").get("href"))] = (
+            entry.findtext(f"{ATOM}author/{ATOM}email"), entry.findtext(ATOM + "title"),
+            msgid_of(parent.get("href")) if parent is not None else None)
+    author, subject, _ = thread[msgid]
+    under = {msgid}
+    while more := {m for m, (_, _, parent) in thread.items() if parent in under} - under:
+        under |= more
+    replied = any(thread[m][0] != author for m in under)
+    # The list from the url, else the kernel's "subsystem: " prefix of the subject
+    listed = u.path.strip("/").split("/")[0]
+    prefix = re.match(r"(?:\s*\[[^\]]*\])*\s*([\w/.-]+):", subject)
+    project = listed if listed not in ("all", "r") else prefix.group(1) if prefix else "lore"
+    return "replied" if replied else "sent", subject, project
+
+
+def ask_mail(u):
+    return "sent", None, where(u.geturl())
+
+
+ASK = {"github": ask_github, "gitlab": ask_gitlab, "bugzilla": ask_bugzilla, "forgejo": ask_forgejo,
+       "launchpad": ask_launchpad, "debian": ask_debian, "sourcehut": ask_sourcehut,
+       "patchwork": ask_patchwork, "lore": ask_lore, "mail": ask_mail}
+
+
+def lookup(url):
+    """(status, title, project) from the url's tracker; raises if it can't be asked."""
+    ask = ASK.get(tracker(url))
+    if not ask:
+        raise IssError("iss doesn't know that tracker")
+    status, title, project = ask(urllib.parse.urlparse(url))
+    return status, title and " ".join(title.split()), project
+
+
+def fetch(url):
+    """Live state of an issue, MR, PR or patch, or "?" if its tracker can't be asked."""
+    try:
+        return lookup(url)[0]
     except Exception:
         return "?"
-    return "?"
+
+
+def get(url, data=None, headers={}):
+    req = urllib.request.Request(url, data, headers={"User-Agent": "iss", **headers})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read()
 
 
 def get_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "iss", "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.load(r)
+    return json.loads(get(url, headers={"Accept": "application/json"}))
 
 
 def statuses(urls):
@@ -274,14 +435,50 @@ def details(name):
             "files": files, "loose": loose_files(name), "path": str(folder)}
 
 
-def new(name):
+def check_url(url):
+    if not URL.fullmatch(url or ""):
+        raise IssError("paste a full http(s) link")
+    for name, urls, _, _ in issues():
+        if url in urls:
+            raise IssError(f"that link is already in {name}")
+
+
+def slug(text, words=5):
+    """The first few words, lowercase and dashed, minus [PATCH v2 1/3] tags and a "subsystem: " prefix."""
+    text = re.sub(r"^(\s*(\[[^\]]*\]|re:|[\w/.-]+:\s))*", "", text, flags=re.I)
+    return "-".join(re.findall(r"[a-z0-9]+", text.lower())[:words])
+
+
+def suggest(url):
+    """A folder name and title for something already filed, from its tracker."""
+    check_url(url)
+    try:
+        _, title, project = lookup(url)
+    except Exception:
+        raise IssError("couldn't get its title from the tracker, name the folder yourself")
+    if not title:
+        raise IssError("that tracker has no title to give, name the folder yourself")
+    if link_type(url) == "patch":
+        # The list already tags patches, so [PATCH v2 1/3] is only noise in the title
+        title = re.sub(r"^(\s*\[[^\]]*\])+\s*", "", title) or title
+    base = f"{slug(project, 3) or 'issue'}-{slug(title) or 'issue'}"
+    name, n = base, 2
+    while (ROOT / name).exists():
+        name, n = f"{base}-{n}", n + 1
+    return {"name": name, "title": title}
+
+
+def new(name, url="", title=""):
+    """Start an issue: a draft, or with url, one that's already filed."""
+    if url:
+        check_url(url)
     if not NAME.fullmatch(name or ""):
         raise IssError("use <project>-<slug>, lowercase, like gtk-pen-proximity")
     folder = ROOT / name
     if folder.exists():
         raise IssError(f"{name} already exists")
     folder.mkdir()
-    (folder / "README.md").write_text(TEMPLATE.format(title=name))
+    (folder / "README.md").write_text(TEMPLATE.format(url=url and " " + url, title=title or name))
 
 
 def delete(name, typed):
@@ -292,6 +489,32 @@ def delete(name, typed):
                       capture_output=True, text=True).stdout.strip():
         subprocess.run(["git", "rm", "-r", "-q", "--", name], cwd=ROOT, check=True)
     shutil.rmtree(folder, ignore_errors=True)
+
+
+def add_file(name, filename, stream, length):
+    """Save length bytes from stream into the issue's folder, numbered if the name's taken.
+
+    Returns the name it got, so a pasted image.png can come back as image-2.png."""
+    folder = folder_of(name)
+    filename = filename.replace("\\", "/").rpartition("/")[2].strip()
+    if not filename or filename.startswith("."):
+        raise IssError(f"can't add a file called {filename or 'nothing'}")
+    target, n = folder / filename, 2
+    while target.exists():
+        target, n = folder / f"{Path(filename).stem}-{n}{Path(filename).suffix}", n + 1
+    try:
+        # Written as it arrives, so a big log or video never sits in memory
+        with open(target, "xb") as f:
+            while length > 0:
+                chunk = stream.read(min(length, 1 << 20))
+                if not chunk:
+                    raise IssError(f"{filename} stopped arriving halfway")
+                f.write(chunk)
+                length -= len(chunk)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target.name
 
 
 def save(name, text):
@@ -411,6 +634,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         parts = self.path.strip("/").split("/")
         try:
+            if parts[:2] == ["api", "upload"] and len(parts) == 4:
+                # The body is the file itself, not JSON
+                if ROOT is None:
+                    return self.reply(409, {"error": "Pick where your issues live first."})
+                name, filename = (urllib.parse.unquote(p) for p in parts[2:])
+                return self.reply(200, {"file": add_file(name, filename, self.rfile,
+                                                         int(self.headers.get("Content-Length") or 0))})
             data = self.body()
             if parts == ["api", "setup", "check"]:
                 return self.reply(200, check_folder(data.get("path", "")))
@@ -422,8 +652,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(200, create_repo(data.get("name", "")))
             if parts == ["api", "statuses"]:
                 return self.stream_statuses(data.get("urls", []))
+            if parts == ["api", "suggest"]:
+                return self.reply(200, suggest(data.get("url", "").strip()))
             if parts == ["api", "new"]:
-                new(data.get("name", "").strip())
+                new(data.get("name", "").strip(), data.get("url", "").strip(), data.get("title", "").strip())
             elif parts == ["api", "save"]:
                 save(data.get("name", ""), data.get("readme", ""))
             elif parts == ["api", "delete"]:
@@ -503,9 +735,20 @@ def main(argv):
                 status = row["status"] + (", hold" if row["hold"] else "")
                 also = "".join(f"  + {l['ref'] or l['where']} {l['status']}" for l in row["links"])
                 print(f"{row['where']:<22.22} {status:<12} {row['title']}{also}")
-        elif argv[0] == "new" and len(argv) == 2:
+        elif argv[0] == "new" and len(argv) == 2 and not URL.fullmatch(argv[1]):
             new(argv[1])
             print(f"iss: started {argv[1]}/README.md")
+        elif argv[0] == "new" and len(argv) in (2, 3):
+            url = argv[1]
+            try:
+                found = suggest(url)
+            except IssError:
+                if len(argv) == 2:
+                    raise
+                found = {"title": ""}  # named by hand, so the title can wait
+            name = argv[2] if len(argv) == 3 else found["name"]
+            new(name, url, found["title"])
+            print(f"iss: started {name}/README.md" + (f", {found['title']}" if found["title"] else ""))
         elif argv[0] == "delete" and len(argv) == 2:
             info = details(argv[1])
             if info["loose"]:
