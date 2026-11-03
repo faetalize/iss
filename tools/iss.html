@@ -1,0 +1,962 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issues</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f7f7f5; --side: #f1f1ee; --panel: #ffffff; --raised: #ffffff; --hover: #ebebe7; --sel: #e4e6f5;
+    --line: #e3e2dd; --line-strong: #d2d1cb; --text: #18181a; --muted: #6e6d69; --faint: #9b9a95;
+    --accent: #4554e0; --accent-ink: #ffffff; --ring: #4554e055; --code: #f2f1ed;
+    --open: #1f8a4c; --open-bg: #dff3e6; --draft: #a46b00; --draft-bg: #fbefd2; --hold: #6e6d69; --hold-bg: #ecebe7;
+    --done: #7a4fd0; --done-bg: #eee6fb; --unknown: #6e6d69; --danger: #c93a2e; --danger-bg: #fbe4e1;
+    --shadow: 0 1px 2px rgb(0 0 0 / .04), 0 8px 24px rgb(0 0 0 / .08);
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #111113; --side: #161618; --panel: #1a1a1d; --raised: #222226; --hover: #232327; --sel: #262a45;
+      --line: #2a2a2e; --line-strong: #37373c; --text: #ececee; --muted: #9a9aa1; --faint: #6c6c73;
+      --accent: #8b95ff; --accent-ink: #11131f; --ring: #8b95ff55; --code: #232327;
+      --open: #5fd38d; --open-bg: #183223; --draft: #f2c25b; --draft-bg: #33280f; --hold: #a3a3a9; --hold-bg: #26262a;
+      --done: #b99bff; --done-bg: #2a2340; --unknown: #a3a3a9; --danger: #ff8475; --danger-bg: #3a1c19;
+      --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 12px 32px rgb(0 0 0 / .45);
+    }
+  }
+
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.55 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+         -webkit-font-smoothing: antialiased; }
+  button, input, textarea { font: inherit; color: inherit; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px;
+        border-radius: 4px; color: var(--muted); background: var(--panel); }
+  .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
+         stroke-linecap: round; stroke-linejoin: round; }
+
+  /* buttons */
+  .btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 8px;
+         border: 1px solid var(--line); background: var(--panel); cursor: pointer; font-weight: 500; white-space: nowrap;
+         text-decoration: none; color: var(--text); transition: background .12s, border-color .12s; }
+  .btn:hover { background: var(--hover); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .btn:disabled { opacity: .45; cursor: default; filter: none; }
+  .icon-btn { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; border: 0;
+              background: transparent; color: var(--muted); cursor: pointer; text-decoration: none; position: relative; }
+  .icon-btn:hover { background: var(--hover); color: var(--text); }
+  .icon-btn[aria-disabled=true] { opacity: .35; pointer-events: none; }
+  .group { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; padding: 2px; gap: 2px; background: var(--panel); }
+  .group .icon-btn { width: 30px; height: 28px; border-radius: 7px; }
+  .spin .ico { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* tooltips */
+  [data-tip]::after { content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); font-size: 12px; font-weight: 500; padding: 4px 8px; border-radius: 6px;
+    white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity .1s; z-index: 30; }
+  [data-tip]:hover::after, [data-tip]:focus-visible::after { opacity: 1; transition-delay: .25s; }
+  [data-tip-end]::after { left: auto; right: 0; transform: none; }
+
+  /* layout */
+  .app { display: grid; grid-template-columns: 380px 1fr; height: 100%; }
+  .side { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .main { overflow: auto; min-width: 0; position: relative; }
+
+  .side-head { padding: 14px 14px 0; display: grid; gap: 12px; }
+  .mark { width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color: var(--accent-ink);
+          display: grid; place-items: center; flex: none; }
+  .mark .ico { width: 15px; height: 15px; stroke-width: 2.2; }
+  /* One bar: filter on the left, the two list actions folded in on the right */
+  .search { display: flex; align-items: center; gap: 2px; height: 38px; padding: 0 3px 0 10px; border-radius: 10px;
+            border: 1px solid var(--line); background: var(--panel); }
+  .search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+  .search > .ico { color: var(--faint); margin-right: 6px; }
+  .search input { flex: 1; min-width: 0; height: 100%; border: 0; background: transparent; padding: 0; }
+  .search input:focus { outline: none; }
+  .search input::-webkit-search-cancel-button { display: none; }
+  .search kbd { margin-right: 6px; }
+  .search:focus-within kbd, .search input:not(:placeholder-shown) ~ kbd { display: none; }
+  .search .div { width: 1px; height: 18px; background: var(--line); margin: 0 3px; }
+  .search .icon-btn { width: 30px; height: 30px; }
+  .search .new { color: var(--accent); }
+  .search .new:hover { background: var(--accent); color: var(--accent-ink); }
+  .tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; margin: 0 -2px; padding: 0 2px 10px;
+          border-bottom: 1px solid var(--line); }
+  .tab { border: 0; background: transparent; padding: 5px 9px; border-radius: 7px; cursor: pointer; color: var(--muted);
+         font-weight: 500; font-size: 13px; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+  .tab:hover { color: var(--text); background: var(--hover); }
+  .tab[aria-selected=true] { color: var(--text); background: var(--panel); box-shadow: 0 0 0 1px var(--line); }
+  .tab .n { font: 11.5px var(--mono); color: var(--faint); }
+
+  .list { overflow: auto; flex: 1; padding: 0 8px 24px; }
+  .grp { font-size: 11.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--faint);
+         padding: 14px 8px 6px; display: flex; gap: 8px; position: sticky; top: 0; background: var(--side); z-index: 1; }
+  .row { display: grid; grid-template-columns: 14px 1fr; gap: 0 10px; width: 100%; text-align: left; border: 0;
+         background: transparent; padding: 8px 10px; border-radius: 9px; cursor: pointer; }
+  .row:hover { background: var(--hover); }
+  .row[aria-current=true] { background: var(--sel); }
+  .row .dot { margin-top: 7px; }
+  .row .t { font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; overflow: hidden; }
+  .row .m { grid-column: 2; margin-top: 3px; font: 12px var(--mono); color: var(--muted); overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
+  .row code, .title code, .pal-item code { font: .9em var(--mono); background: var(--code); padding: 0 4px; border-radius: 4px; }
+  .empty-list { color: var(--muted); padding: 40px 16px; text-align: center; font-size: 13px; }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 3px var(--cb); flex: none; }
+  .dot.hold { background: transparent; border: 1.5px dashed var(--hold); box-shadow: none; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 8px; border-radius: 999px;
+           font-size: 12px; font-weight: 600; color: var(--c); background: var(--cb); text-transform: capitalize; }
+  .badge .dot { width: 7px; height: 7px; box-shadow: none; background: currentColor; border: 0; }
+  .tag { font: 600 10.5px var(--mono); letter-spacing: .02em; color: var(--muted); border: 1px solid var(--line-strong);
+         border-radius: 5px; padding: 0 5px; margin-left: 7px; vertical-align: 1px; }
+  .facts .tag { margin-left: 0; font-size: 11px; padding: 2px 6px; }
+  .k-open { --c: var(--open); --cb: var(--open-bg); }
+  .k-draft { --c: var(--draft); --cb: var(--draft-bg); }
+  .k-hold { --c: var(--hold); --cb: var(--hold-bg); }
+  .k-done { --c: var(--done); --cb: var(--done-bg); }
+  .k-unknown { --c: var(--unknown); --cb: var(--hold-bg); }
+  .k-loading { --c: var(--faint); --cb: var(--hold-bg); }
+  .k-loading .dot { animation: pulse .9s ease-in-out infinite alternate; }
+  @keyframes pulse { to { opacity: .3; } }
+
+  /* detail */
+  .detail { max-width: 920px; margin: 0 auto; padding: 0 36px 80px; }
+  .bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 8px; padding: 12px 36px;
+         margin: 0 -36px; background: color-mix(in srgb, var(--bg) 86%, transparent); backdrop-filter: blur(10px);
+         border-bottom: 1px solid transparent; }
+  .crumbs { min-width: 0; font: 12.5px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tools { display: inline-flex; gap: 1px; }
+  .tools .icon-btn { width: 28px; height: 28px; }
+  .tools .del:hover { color: var(--danger); background: var(--danger-bg); }
+  .facts .mini { width: 26px; height: 26px; margin-left: -6px; }
+  .facts .mini .ico { width: 14px; height: 14px; }
+  .back { display: none; }
+  .title { font-size: 26px; line-height: 1.25; letter-spacing: -.02em; margin: 14px 0 12px; overflow-wrap: anywhere; }
+  .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+  /* The first link sets the status; the others sit under it with their own */
+  .links { display: grid; gap: 8px; margin-bottom: 22px; }
+  .links .facts + .facts .badge { height: 22px; font-size: 11.5px; }
+  .facts .unlink:hover { color: var(--danger); background: var(--danger-bg); }
+  .facts a { overflow-wrap: anywhere; }
+  .facts .ext { display: inline-flex; align-items: center; gap: 4px; }
+  .facts .ext .ico { width: 13px; height: 13px; }
+  .facts code { font: 12px var(--mono); background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  .seg { display: inline-flex; background: var(--hover); border-radius: 9px; padding: 2px; }
+  .seg button { border: 0; background: transparent; height: 28px; padding: 0 11px; border-radius: 7px; cursor: pointer;
+                color: var(--muted); font-weight: 500; font-size: 13px; }
+  .seg button[aria-pressed=true] { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+
+  .doc { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+  .doc:focus-within:has(textarea) { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+  .doc-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 18px; border-bottom: 1px solid var(--line);
+              position: sticky; top: 52px; z-index: 4; background: var(--panel); border-radius: 14px 14px 0 0; }
+  .doc-name { flex: 1; min-width: 0; font: 12.5px var(--mono); color: var(--muted); display: flex; gap: 12px; align-items: center;
+              white-space: nowrap; overflow: hidden; }
+  .doc-name .state { font: 12px Inter, system-ui, sans-serif; color: var(--faint); }
+  .doc-body { padding: 6px 34px 26px; }
+  .doc-body.editing { padding: 0; }
+  .btn.sm { height: 28px; padding: 0 10px; font-size: 13px; border-radius: 7px; }
+  .raw { margin: 20px 0 0; font: 12.5px/1.65 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+  .editing textarea { display: block; width: 100%; height: max(320px, calc(100vh - 290px)); border: 0; border-radius: 0 0 14px 14px;
+                      padding: 20px 24px; background: transparent; font: 13px/1.65 var(--mono); resize: vertical; }
+  .editing textarea:focus { outline: none; }
+
+  .md > h1:first-child { display: none; }
+  .md h1 { font-size: 20px; margin: 28px 0 10px; }
+  .md h2 { font-size: 17px; margin: 28px 0 10px; letter-spacing: -.01em; }
+  .md h3, .md h4, .md h5 { font-size: 15px; margin: 22px 0 8px; }
+  .md p, .md ul, .md ol, .md blockquote, .md table { margin: 0 0 14px; }
+  .md > :first-child:not(h1), .md > h1:first-child + * { margin-top: 22px; }
+  .md ul, .md ol { padding-left: 22px; }
+  .md li { margin: 3px 0; }
+  .md li::marker { color: var(--faint); }
+  .md code { background: var(--code); padding: 1px 5px; border-radius: 5px; font: 12.5px var(--mono); }
+  .md .pre { position: relative; margin: 0 0 14px; }
+  .md pre { background: var(--code); padding: 14px 16px; border-radius: 10px; overflow: auto; margin: 0; font: 12.5px/1.6 var(--mono); }
+  .md pre code { background: none; padding: 0; }
+  .md .pre .icon-btn { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; opacity: 0; background: var(--panel);
+                       box-shadow: 0 0 0 1px var(--line); }
+  .md .pre:hover .icon-btn, .md .pre .icon-btn:focus-visible { opacity: 1; }
+  .md blockquote { border-left: 3px solid var(--line-strong); padding: 2px 0 2px 14px; color: var(--muted); }
+  .md table { border-collapse: collapse; display: block; overflow: auto; font-size: 13.5px; }
+  .md th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12.5px; }
+  .md th, .md td { border-bottom: 1px solid var(--line); padding: 7px 14px 7px 0; vertical-align: top; }
+  .md img { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 22px 0; }
+  .md a { overflow-wrap: anywhere; }
+
+  .files { margin-top: 32px; }
+  .files h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin: 0 0 12px;
+              display: flex; gap: 8px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+  .tile { display: grid; grid-template-rows: 96px auto; border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+          background: var(--panel); color: var(--text); text-decoration: none; transition: border-color .12s, transform .12s; }
+  .tile:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+  .thumb { display: grid; place-items: center; background: var(--code); color: var(--faint); overflow: hidden; text-align: center; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .thumb .ico { width: 26px; height: 26px; stroke-width: 1.4; }
+  .thumb .ext { font: 600 11px var(--mono); color: var(--muted); margin-top: 4px; text-transform: uppercase; }
+  .tile .name { padding: 8px 10px; font: 12px var(--mono); display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .tile .name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .loose { width: 7px; height: 7px; border-radius: 50%; background: var(--draft); flex: none; }
+
+  .welcome { min-height: 100%; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 24px; }
+  .welcome .mark { width: 40px; height: 40px; border-radius: 12px; margin: 0 auto; }
+  .welcome .mark .ico { width: 20px; height: 20px; }
+  .welcome h2 { color: var(--text); font-size: 17px; margin: 14px 0 6px; }
+  .keys { display: grid; grid-template-columns: auto auto; gap: 8px 14px; margin-top: 20px; text-align: left; font-size: 13px; }
+  .keys > :nth-child(odd) { text-align: right; }
+  .welcome .md { text-align: left; margin: 18px 0 14px; }
+  .welcome .md pre { font-size: 12px; }
+  .welcome p { max-width: 440px; margin: 0 auto; }
+  .welcome .btn { margin-top: 18px; }
+
+  /* first run: where the issues live, then GitHub */
+  .setup { display: none; min-height: 100%; place-items: center; padding: 24px 16px; }
+  body.setting-up .app { display: none; }
+  body.setting-up .setup { display: grid; }
+  .setup .dlg { width: min(480px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+  .setup h1 { margin: 6px 0 0; font-size: 19px; letter-spacing: -.01em; }
+  .choice { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; cursor: pointer; }
+  .choice:has(input[type=radio]:checked) { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+  .choice > span { display: flex; gap: 8px; align-items: center; font-weight: 500; font-size: 13.5px; }
+  .setup .choice input[type=radio] { margin: 0; height: auto; padding: 0; border: 0; box-shadow: none; accent-color: var(--accent); }
+  .dlg .note { color: var(--open); font-size: 13px; min-height: 1.2em; margin: -4px 0 0; }
+
+  /* dialogs, palette */
+  dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--raised); color: var(--text); padding: 0;
+           box-shadow: var(--shadow); width: min(480px, calc(100% - 32px)); }
+  dialog::backdrop { background: rgb(10 10 12 / .45); backdrop-filter: blur(2px); }
+  .dlg { padding: 20px; display: grid; gap: 14px; }
+  .dlg h2 { margin: 0; font-size: 16px; }
+  .dlg p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  .dlg .field { display: grid; gap: 6px; font-size: 13px; font-weight: 500; }
+  .dlg input { height: 36px; border: 1px solid var(--line); border-radius: 9px; padding: 0 11px; background: var(--panel); font: 13px var(--mono); }
+  .dlg input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+  .dlg .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  .dlg .error { color: var(--danger); font-size: 13px; min-height: 1.2em; }
+  .dlg code { font: 12.5px var(--mono); background: var(--code); padding: 1px 6px; border-radius: 5px; }
+  .warn { background: var(--danger-bg); color: var(--danger) !important; border-radius: 9px; padding: 10px 12px; }
+
+  #palette { width: min(600px, calc(100% - 32px)); margin-top: 12vh; }
+  .pal-in { display: flex; align-items: center; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--faint); }
+  .pal-in input { flex: 1; height: 52px; border: 0; background: transparent; font-size: 15px; color: var(--text); }
+  .pal-in input:focus { outline: none; }
+  .pal-list { max-height: 50vh; overflow: auto; padding: 6px; }
+  .pal-item { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: transparent; text-align: left;
+              padding: 9px 10px; border-radius: 8px; cursor: pointer; color: var(--text); }
+  .pal-item > .ico { color: var(--muted); }
+  .pal-item[aria-selected=true] { background: var(--sel); }
+  .pal-item .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pal-item .m { font: 11.5px var(--mono); color: var(--faint); flex: none; }
+  .pal-foot { display: flex; gap: 14px; padding: 9px 16px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+
+  .toast { position: fixed; bottom: 22px; left: 50%; transform: translate(-50%, 8px); background: var(--text); color: var(--bg);
+           padding: 8px 14px; border-radius: 10px; font-size: 13px; font-weight: 500; opacity: 0; pointer-events: none;
+           transition: opacity .18s, transform .18s; display: flex; gap: 8px; align-items: center; z-index: 50; }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  @media (max-width: 860px) {
+    .app { grid-template-columns: 1fr; }
+    .main { display: none; }
+    body.show-detail .side { display: none; }
+    body.show-detail .main { display: block; }
+    .back { display: inline-grid; }
+    .detail { padding: 0 16px 60px; }
+    .bar { padding: 10px 16px; margin: 0 -16px; }
+    .title { font-size: 22px; }
+    .search kbd, .doc-name .state { display: none; }
+    .doc-head { padding-left: 14px; }
+    .doc-body { padding: 4px 18px 18px; }
+    .side-head { padding-top: 12px; }
+    [data-tip]::after { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="setup" id="setup"></div>
+<div class="app">
+  <aside class="side">
+    <div class="side-head">
+      <div class="search">
+        <span id="searchIcon"></span>
+        <input id="search" type="search" placeholder="Filter issues" aria-label="Filter issues" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+        <span class="div"></span>
+        <button class="icon-btn" id="refresh" data-tip="Refresh statuses" aria-label="Refresh statuses"></button>
+        <button class="icon-btn new" id="new" data-tip="New draft (n)" data-tip-end aria-label="New draft"></button>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Status" id="tabs"></div>
+    </div>
+    <nav class="list" id="list" aria-label="Issues"></nav>
+  </aside>
+  <main class="main" id="main"></main>
+</div>
+
+<dialog id="newDialog">
+  <form class="dlg" method="dialog" id="newForm">
+    <h2>New draft</h2>
+    <p>Creates a folder with a README. Once it's filed, add the issue, MR or PR link.</p>
+    <label class="field">Folder name
+      <input id="newName" placeholder="gtk-pen-proximity" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="error" id="newError"></div>
+    <div class="actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="go">Create draft</button></div>
+  </form>
+</dialog>
+
+<dialog id="linkDialog">
+  <form class="dlg" method="dialog" id="linkForm">
+    <h2>Add a link</h2>
+    <p>An issue, MR, PR or patch, like the MR that fixes this issue or the issue behind this MR. The first link sets the status, the others show with their own.</p>
+    <label class="field">Link
+      <input id="linkUrl" type="url" placeholder="https://gitlab.gnome.org/GNOME/gtk/-/merge_requests/1234" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="error" id="linkError"></div>
+    <div class="actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="go">Add link</button></div>
+  </form>
+</dialog>
+
+<dialog id="delDialog">
+  <form class="dlg" method="dialog" id="delForm">
+    <h2>Delete this issue?</h2>
+    <div id="delInfo"></div>
+    <label class="field"><span>Type <code id="delName"></code> to confirm</span>
+      <input id="delTyped" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="error" id="delError"></div>
+    <div class="actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn danger" id="delGo" value="go" disabled>Delete</button></div>
+  </form>
+</dialog>
+
+<dialog id="palette" aria-label="Command palette">
+  <div class="pal-in"><span id="palIcon"></span><input id="palInput" placeholder="Jump to an issue or run a command" autocomplete="off" spellcheck="false"></div>
+  <div class="pal-list" id="palList" role="listbox"></div>
+  <div class="pal-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
+</dialog>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+
+// --- icons, inline so the page makes no outside requests ---
+const P = {
+  refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
+  plus: "M12 5v14M5 12h14",
+  search: "M11 4a7 7 0 1 0 0 14 7 7 0 1 0 0-14M20 20l-4.2-4.2",
+  external: "M14 4h6v6M10 14 20 4M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5",
+  folder: "M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z",
+  copy: "M9 9h10.5v10.5H9zM15 9V5.5a1 1 0 0 0-1-1H5.5a1 1 0 0 0-1 1V14a1 1 0 0 0 1 1H9",
+  check: "M5 12.5l4.5 4.5L19 7",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
+  trash: "M4 7h16M10 11v6M14 11v6M9 7V4.5h6V7M6 7l1 13h10l1-13",
+  pencil: "M15.5 4.5l4 4L8 20H4v-4z",
+  back: "M15 5l-7 7 7 7",
+  file: "M14 3H7a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 7 21h10a1.5 1.5 0 0 0 1.5-1.5V7.5zM14 3v4.5h4.5",
+  code: "M9 8l-4 4 4 4M15 8l4 4-4 4",
+  image: "M4 5h16v14H4zM4 16l4.5-4.5 4 4 2.5-2.5L20 18M15.5 8.5h.01",
+  link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+  x: "M6 6l12 12M18 6 6 18",
+  cloud: "M7 18a4.5 4.5 0 0 1-.6-9 6 6 0 0 1 11.3 1.6A3.8 3.8 0 0 1 17.5 18z",
+};
+const icon = (n) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="${P[n]}"/></svg>`;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+// --- state ---
+let issues = [], current = null, filter = "all", editing = false, dirty = false, detail = null;
+let view = "preview";
+try { view = localStorage.getItem("iss-view") || "preview"; } catch (e) {}
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "X-Iss-Token": TOKEN, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function toast(text, ic = "check") {
+  const t = $("toast");
+  t.innerHTML = icon(ic) + `<span>${esc(text)}</span>`;
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 1900);
+}
+
+// --- status ---
+function kind(i) {
+  if (i.hold) return "hold";
+  if (i.status === "draft") return "draft";
+  if (i.status === "loading") return "loading";
+  if (i.status === "?") return "unknown";
+  if (/^(open|sent|new|unconfirmed|assigned|reopened)$/.test(i.status)) return "open";
+  return "done";
+}
+const GROUPS = [["open", "Open"], ["draft", "Drafts"], ["hold", "On hold"], ["done", "Closed"]];
+const groupOf = (i) => (kind(i) === "unknown" || kind(i) === "loading" ? "open" : kind(i));
+// MRs, PRs and patches get a tag; issues are the default and don't
+const TYPE = { mr: "MR", pr: "PR", patch: "patch" };
+const typeTag = (i) => TYPE[i.type] ? `<span class="tag">${TYPE[i.type]}</span>` : "";
+// Linked items in the same project show just their ref, others their project too
+const short = (l, i) => l.where === i.where && l.ref ? l.ref : l.where + (l.ref ? " " + l.ref : "");
+const where = (i) => esc(i.where) + (i.ref ? " " + esc(i.ref) : "") + i.links.map((l) => " · " + esc(short(l, i))).join("");
+const label = (i) => i.hold ? (i.status === "draft" ? "on hold" : i.status + " · hold") : i.status === "?" ? "unknown" : i.status;
+
+// --- sidebar ---
+function visible() {
+  const q = $("search").value.trim().toLowerCase();
+  return issues.filter((i) => (filter === "all" || groupOf(i) === filter) &&
+    (!q || (i.title + " " + i.where + " " + i.name + " " + i.links.map((l) => l.where).join(" ")).toLowerCase().includes(q)));
+}
+
+function renderTabs() {
+  const n = (g) => issues.filter((i) => groupOf(i) === g).length;
+  const tabs = [["all", "All", issues.length], ...GROUPS.map(([g, t]) => [g, t, n(g)])];
+  $("tabs").innerHTML = tabs.map(([g, t, c]) =>
+    `<button class="tab" role="tab" data-f="${g}" aria-selected="${filter === g}">${t}<span class="n">${c}</span></button>`).join("");
+}
+
+function rowHtml(i) {
+  return `<button class="row k-${kind(i)}" data-name="${esc(i.name)}" aria-current="${i.name === current}">
+    <span class="dot ${kind(i) === "hold" ? "hold" : ""}" title="${esc(label(i))}"></span>
+    <span class="t">${inline(i.title, i.name)}</span>
+    <span class="m">${where(i)}${typeTag(i)}</span>
+  </button>`;
+}
+
+function renderList() {
+  renderTabs();
+  const shown = visible();
+  if (!shown.length) { $("list").innerHTML = `<p class="empty-list">Nothing here.</p>`; return; }
+  if (filter !== "all") { $("list").innerHTML = `<div style="height:8px"></div>` + shown.map(rowHtml).join(""); return; }
+  $("list").innerHTML = GROUPS.map(([g, t]) => {
+    const rows = shown.filter((i) => groupOf(i) === g);
+    return rows.length ? `<div class="grp">${t}</div>${rows.map(rowHtml).join("")}` : "";
+  }).join("");
+}
+
+// Statuses live only in the page: the list comes straight from disk, then every
+// tracker is asked at once and each badge fills in as its answer streams back
+let statusOf = {};
+const asking = new Set();
+
+function applyStatuses() {
+  for (const i of issues) {
+    if (i.url) i.status = statusOf[i.url] ?? "loading";
+    for (const l of i.links) l.status = statusOf[l.url] ?? "loading";
+  }
+}
+
+async function load(refresh) {
+  if (refresh) statusOf = {};
+  try {
+    issues = await api("/api/issues");
+    applyStatuses();
+    renderList();
+    if (current && !issues.some((i) => i.name === current)) select(null);
+    else if (!current && !document.querySelector(".detail")) $("main").innerHTML = welcome();
+  } catch (e) { toast(e.message, "refresh"); return; }
+  const missing = issues.flatMap((i) => [i.url, ...i.links.map((l) => l.url)]).filter((u) => u && !(u in statusOf) && !asking.has(u));
+  if (!missing.length) return;
+  const btn = $("refresh");
+  if (refresh) btn.classList.add("spin");
+  try { await hydrate(missing); if (refresh) toast("Statuses up to date", "refresh"); }
+  catch (e) { toast(e.message, "refresh"); }
+  btn.classList.remove("spin");
+}
+
+async function hydrate(urls) {
+  urls.forEach((u) => asking.add(u));
+  try {
+    const r = await fetch("/api/statuses", {
+      method: "POST", headers: { "X-Iss-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify({ urls }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = "", queued = false;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const line of lines) if (line) { const { url, status } = JSON.parse(line); statusOf[url] = status; asking.delete(url); }
+      // Batch the redraws: answers often land together
+      if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; applyStatuses(); renderList(); if (detail && $("links")) renderLinks(); }); }
+    }
+  } finally { urls.forEach((u) => asking.delete(u)); }
+}
+
+// --- Markdown, enough for these READMEs ---
+function inline(s, name) {
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(esc(c)) - 1}\u0000`);
+  s = esc(s);
+  const href = (u) => {
+    if (/^(https?:|mailto:|#)/.test(u)) return u;
+    const other = u.match(/^\.\.\/([a-z0-9-]+)\/?$/);
+    if (other) return "#" + other[1];
+    return "/file/" + encodeURIComponent(name) + "/" + u.replace(/^\.\//, "");
+  };
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, (_, alt, u) => `<img alt="${alt}" src="${href(u)}" loading="lazy">`);
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => `<a href="${href(u)}"${/^https?:/.test(u) ? ' target="_blank" rel="noreferrer"' : ""}>${t}</a>`);
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:])/g, '$1<a href="$2" target="_blank" rel="noreferrer">$2</a>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[\s(])_([^_]+)_(?=[\s).,;:]|$)/g, "$1<em>$2</em>");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[n]}</code>`);
+}
+
+function markdown(text, name) {
+  const lines = text.replace(/^---\n[\s\S]*?\n---\n/, "").split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length;) {
+    const l = lines[i];
+    if (/^```/.test(l)) {
+      const code = [];
+      for (i++; i < lines.length && !/^```/.test(lines[i]); i++) code.push(lines[i]);
+      out.push(`<div class="pre"><pre><code>${esc(code.join("\n"))}</code></pre><button class="icon-btn copy-code" aria-label="Copy" data-tip="Copy" data-tip-end>${icon("copy")}</button></div>`);
+      i++; continue;
+    }
+    const h = l.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { out.push(`<h${h[1].length}>${inline(h[2], name)}</h${h[1].length}>`); i++; continue; }
+    if (/^\s*(---|\*\*\*)\s*$/.test(l)) { out.push("<hr>"); i++; continue; }
+    if (/^\|/.test(l) && /^\|[\s:|-]+\|?\s*$/.test(lines[i + 1] || "")) {
+      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => inline(c.trim(), name));
+      const head = cells(l); const body = [];
+      for (i += 2; i < lines.length && /^\|/.test(lines[i]); i++) body.push(cells(lines[i]));
+      out.push(`<table><thead><tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>${
+        body.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+      continue;
+    }
+    if (/^>\s?/.test(l)) {
+      const q = [];
+      for (; i < lines.length && /^>\s?/.test(lines[i]); i++) q.push(lines[i].replace(/^>\s?/, ""));
+      out.push(`<blockquote>${inline(q.join(" "), name)}</blockquote>`); continue;
+    }
+    if (/^\s*([-*]|\d+\.)\s+/.test(l)) {
+      const ordered = /^\s*\d/.test(l); const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^\s*([-*]|\d+\.)\s+(.*)$/);
+        if (m) { items.push(m[2]); i++; continue; }
+        if (/^\s{2,}\S/.test(lines[i]) && items.length) { items[items.length - 1] += " " + lines[i].trim(); i++; continue; }
+        break;
+      }
+      const tag = ordered ? "ol" : "ul";
+      out.push(`<${tag}>${items.map((t) => `<li>${inline(t, name)}</li>`).join("")}</${tag}>`); continue;
+    }
+    if (!l.trim()) { i++; continue; }
+    const para = [];
+    for (; i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|>|\||\s*([-*]|\d+\.)\s)/.test(lines[i]); i++) para.push(lines[i]);
+    if (!para.length) { para.push(l); i++; }
+    out.push(`<p>${inline(para.join(" "), name)}</p>`);
+  }
+  return out.join("\n");
+}
+
+// --- detail ---
+function welcome() {
+  if (!issues.length) return `<div class="welcome"><div>
+    <span class="mark">${icon("plus")}</span>
+    <h2>No issues yet</h2>
+    <p>Each issue is a folder with a README. Start one as a draft, and add the link once it's filed.</p>
+    <div class="md"><pre><code>---
+url: https://gitlab.gnome.org/GNOME/gtk/-/issues/1234
+url: https://gitlab.gnome.org/GNOME/gtk/-/merge_requests/5678
+---
+
+# Title</code></pre></div>
+    <p>The first link sets the status. Add more for the MR that fixes it, or the issue behind an MR.</p>
+    <button class="btn primary" id="emptyNew">${icon("plus")}<span>New draft</span></button>
+  </div></div>`;
+  return `<div class="welcome"><div>
+    <span class="mark">${icon("search")}</span>
+    <h2>Pick an issue</h2>
+    <div>or press <kbd>${MOD}</kbd> <kbd>K</kbd> to jump anywhere</div>
+    <div class="keys">
+      <span><kbd>j</kbd> <kbd>k</kbd></span><span>move through the list</span>
+      <span><kbd>/</kbd></span><span>filter</span>
+      <span><kbd>e</kbd></span><span>edit the README</span>
+      <span><kbd>o</kbd></span><span>open the link</span>
+      <span><kbd>l</kbd></span><span>add a link, like the fix MR</span>
+      <span><kbd>n</kbd></span><span>new draft</span>
+    </div></div></div>`;
+}
+
+const fileIcon = (f) => /\.(png|jpe?g|gif|webp|svg)$/i.test(f) ? "image"
+  : /\.(c|h|py|rs|js|mjs|sh|html|patch|diff)$/i.test(f) ? "code" : "file";
+
+async function select(name, { scroll = true } = {}) {
+  if (editing && dirty && name !== current && !confirm("Discard your unsaved changes?")) return;
+  current = name; editing = false; dirty = false;
+  document.body.classList.toggle("show-detail", !!name);
+  history.replaceState(null, "", name ? "#" + name : location.pathname);
+  renderList();
+  if (scroll) document.querySelector(".row[aria-current=true]")?.scrollIntoView({ block: "nearest" });
+  if (!name) { detail = null; $("main").innerHTML = welcome(); return; }
+  let d;
+  try { d = await api("/api/issue/" + encodeURIComponent(name)); }
+  catch (e) { $("main").innerHTML = `<div class="welcome"><p>${esc(e.message)}</p></div>`; return; }
+  if (current !== name) return;
+  detail = d;
+  renderDetail();
+  $("main").scrollTop = 0;
+}
+
+function renderDetail() {
+  const d = detail, i = issues.find((x) => x.name === d.name) || { status: "draft", where: "", title: d.name, links: [] };
+  const loose = new Set(d.loose);
+  const files = d.files.filter((f) => f !== "README.md");
+  const fileUrl = (f) => `/file/${encodeURIComponent(d.name)}/${f.split("/").map(encodeURIComponent).join("/")}`;
+
+  $("main").innerHTML = `<div class="detail">
+    <div class="bar">
+      <button class="icon-btn back" id="back" aria-label="Back to the list">${icon("back")}</button>
+      <span class="crumbs" title="${esc(d.path)}">${esc(d.name)}</span>
+      <div class="tools" role="group" aria-label="Folder">
+        <button class="icon-btn" id="folder" data-tip="Open folder" aria-label="Open folder">${icon("folder")}</button>
+        <button class="icon-btn" id="copy" data-tip="Copy path" aria-label="Copy path">${icon("copy")}</button>
+        <button class="icon-btn del" id="del" data-tip="Delete…" aria-label="Delete">${icon("trash")}</button>
+      </div>
+    </div>
+    <h1 class="title">${inline(i.title, d.name)}</h1>
+    <div class="links" id="links"></div>
+    <section class="doc" id="doc">
+      <header class="doc-head" id="docHead"></header>
+      <div id="body"></div>
+    </section>
+    ${files.length ? `<section class="files"><h2>Files <span>${files.length}</span></h2><div class="tiles">${files.map((f) => `
+      <a class="tile" href="${fileUrl(f)}" target="_blank" title="${esc(f)}${loose.has(f) ? " · not in git" : ""}">
+        <span class="thumb">${fileIcon(f) === "image" ? `<img src="${fileUrl(f)}" alt="" loading="lazy">`
+          : `<span>${icon(fileIcon(f))}<div class="ext">${esc((f.includes(".") ? f.split(".").pop() : "file").slice(0, 6))}</div></span>`}</span>
+        <span class="name">${loose.has(f) ? '<i class="loose" title="Not in git"></i>' : ""}<span>${esc(f)}</span></span>
+      </a>`).join("")}</div></section>` : ""}
+  </div>`;
+  renderLinks();
+  renderBody();
+
+  $("back").onclick = () => select(null);
+  $("folder").onclick = () => api("/api/open-folder", { name: d.name }).then(() => toast("Opened the folder", "folder"), (e) => toast(e.message, "folder"));
+  $("copy").onclick = () => copy(d.path, "Path copied");
+  $("del").onclick = askDelete;
+}
+
+// The first link with the status, then the others with their own; redrawn as statuses arrive
+function renderLinks() {
+  const d = detail, i = issues.find((x) => x.name === d.name) || { status: "draft", links: [] };
+  $("links").innerHTML = `<div class="facts">
+        <span class="badge k-${kind(i)}"><span class="dot"></span>${esc(label(i))}</span>${typeTag(i)}
+        ${i.url ? `${extLink(i.url)}
+                   <button class="icon-btn mini" data-copy="${esc(i.url)}" data-tip="Copy link" aria-label="Copy link">${icon("copy")}</button>`
+                : `<span>Not filed yet. Add the issue, MR or PR link once it is.</span>`}
+        <button class="icon-btn mini" id="addLink" data-tip="${i.url ? "Add a link (l)" : "Add the link (l)"}" aria-label="Add a link">${icon("link")}</button>
+      </div>
+      ${i.links.map((l) => `<div class="facts">
+        <span class="badge k-${kind(l)}"><span class="dot"></span>${esc(label(l))}</span>${typeTag(l)}
+        ${extLink(l.url)}
+        <button class="icon-btn mini" data-copy="${esc(l.url)}" data-tip="Copy link" aria-label="Copy link">${icon("copy")}</button>
+        <button class="icon-btn mini unlink" data-unlink="${esc(l.url)}" data-tip="Remove link" aria-label="Remove link">${icon("x")}</button>
+      </div>`).join("")}`;
+  $("addLink").onclick = openLink;
+  $("links").querySelectorAll("[data-copy]").forEach((b) => b.onclick = () => copy(b.dataset.copy, "Link copied"));
+  $("links").querySelectorAll("[data-unlink]").forEach((b) => b.onclick = () => unlinkUrl(b.dataset.unlink));
+}
+
+const extLink = (url) => `<a class="ext" href="${esc(url)}" target="_blank" rel="noreferrer">${esc(url.replace(/^https?:\/\//, ""))}${icon("external")}</a>`;
+
+function openLink() {
+  if (!detail) return;
+  $("linkUrl").value = ""; $("linkError").textContent = "";
+  $("linkDialog").showModal(); $("linkUrl").focus();
+}
+$("linkForm").onsubmit = async (e) => {
+  if (e.submitter?.value === "cancel") return;
+  e.preventDefault();
+  const name = detail.name;
+  try {
+    await api("/api/link", { name, url: $("linkUrl").value.trim() });
+    $("linkDialog").close(); toast("Link added", "link");
+    await load(false); await select(name, { scroll: false });
+  } catch (err) { $("linkError").textContent = err.message; }
+};
+
+async function unlinkUrl(url) {
+  const name = detail.name;
+  try {
+    await api("/api/unlink", { name, url });
+    toast("Link removed", "link");
+    await load(false); await select(name, { scroll: false });
+  } catch (e) { toast(e.message, "link"); }
+}
+
+// The README card: its header holds the controls that act on it
+function renderBody() {
+  const d = detail;
+  if (editing || !d) return;
+  $("docHead").innerHTML = `<span class="doc-name">README.md</span>
+    <div class="seg" role="group" aria-label="View">
+      <button data-view="preview" aria-pressed="${view === "preview"}">Preview</button>
+      <button data-view="source" aria-pressed="${view === "source"}">Source</button>
+    </div>
+    <button class="btn sm" id="edit">${icon("pencil")}<span>Edit</span></button>`;
+  $("body").className = view === "source" ? "doc-body" : "doc-body md";
+  $("body").innerHTML = view === "source" ? `<pre class="raw">${esc(d.readme)}</pre>` : markdown(d.readme, d.name);
+  $("docHead").querySelectorAll("[data-view]").forEach((b) => b.onclick = () => setView(b.dataset.view));
+  $("edit").onclick = startEdit;
+  $("body").querySelectorAll(".copy-code").forEach((b) => b.onclick = () => copy(b.previousElementSibling.textContent, "Copied"));
+}
+
+function setView(v) {
+  view = v;
+  try { localStorage.setItem("iss-view", v); } catch (e) {}
+  if (detail && !editing) renderBody();
+}
+
+function copy(text, msg) {
+  navigator.clipboard.writeText(text).then(() => toast(msg, "copy"), () => toast("Couldn't copy", "copy"));
+}
+
+function startEdit() {
+  if (editing || !detail) return;
+  editing = true; dirty = false;
+  const d = detail;
+  const hint = `<kbd>${MOD}</kbd> <kbd>S</kbd> save · <kbd>esc</kbd> cancel`;
+  $("docHead").innerHTML = `<span class="doc-name">README.md <span class="state" id="state">${hint}</span></span>
+    <button class="btn sm" id="cancel">Cancel</button>
+    <button class="btn sm primary" id="save">${icon("check")}<span>Save</span></button>`;
+  $("body").className = "doc-body editing";
+  $("body").innerHTML = `<textarea id="text" spellcheck="false" aria-label="README source">${esc(d.readme)}</textarea>`;
+  const ta = $("text");
+  ta.focus(); ta.setSelectionRange(0, 0); ta.scrollTop = 0;
+  ta.oninput = () => { dirty = ta.value !== d.readme; $("state").innerHTML = dirty ? "unsaved changes" : hint; };
+  ta.onkeydown = (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); }
+    if (e.key === "Escape") { e.preventDefault(); cancelEdit(); }
+  };
+  $("cancel").onclick = cancelEdit;
+  $("save").onclick = save;
+}
+
+function cancelEdit() {
+  if (dirty && !confirm("Discard your unsaved changes?")) return;
+  editing = false; dirty = false;
+  renderBody();
+}
+
+async function save() {
+  const d = detail, text = $("text").value;
+  try {
+    await api("/api/save", { name: d.name, readme: text });
+    editing = false; dirty = false;
+    toast("Saved");
+    await load(false);
+    await select(d.name, { scroll: false });
+  } catch (e) { toast(e.message, "pencil"); }
+}
+
+function askDelete() {
+  const d = detail;
+  $("delName").textContent = d.name;
+  $("delTyped").value = ""; $("delError").textContent = ""; $("delGo").disabled = true;
+  $("delInfo").innerHTML = d.loose.length
+    ? `<p class="warn">${d.loose.length} file${d.loose.length > 1 ? "s aren't" : " isn't"} in git and will be gone for good: ${d.loose.map(esc).join(", ")}</p>`
+    : `<p>Everything in this folder is in git, so its history keeps it.</p>`;
+  $("delTyped").oninput = () => { $("delGo").disabled = $("delTyped").value.trim() !== d.name; };
+  $("delDialog").showModal();
+  $("delTyped").focus();
+}
+
+$("delForm").onsubmit = async (e) => {
+  if (e.submitter?.value === "cancel") return;
+  e.preventDefault();
+  if ($("delGo").disabled) return;
+  const name = detail.name;
+  try {
+    await api("/api/delete", { name, typed: $("delTyped").value.trim() });
+    $("delDialog").close();
+    toast("Deleted " + name, "trash");
+    current = null; detail = null;
+    await load(false); select(null);
+  } catch (err) { $("delError").textContent = err.message; }
+};
+
+function openNew() {
+  $("newName").value = ""; $("newError").textContent = "";
+  $("newDialog").showModal(); $("newName").focus();
+}
+$("newForm").onsubmit = async (e) => {
+  if (e.submitter?.value === "cancel") return;
+  e.preventDefault();
+  const name = $("newName").value.trim();
+  try { await api("/api/new", { name }); $("newDialog").close(); await load(false); await select(name); startEdit(); }
+  catch (err) { $("newError").textContent = err.message; }
+};
+
+// --- command palette ---
+let palItems = [], palIndex = 0;
+function openPalette() {
+  $("palInput").value = ""; palIndex = 0; renderPalette(); $("palette").showModal(); $("palInput").focus();
+}
+function renderPalette() {
+  const q = $("palInput").value.trim().toLowerCase();
+  const cmds = [
+    { t: "New draft", ic: "plus", run: openNew },
+    { t: "Refresh all statuses", ic: "refresh", run: () => load(true) },
+    ...(detail ? [{ t: "Add a link to this issue", ic: "link", run: openLink }] : []),
+    { t: "Change issues folder", ic: "folder", run: () => setupFolder(true) },
+    { t: view === "preview" ? "Show README source" : "Show README preview", ic: "code", run: () => setView(view === "preview" ? "source" : "preview") },
+  ];
+  const fromIssues = issues.map((i) => ({ t: i.title, m: i.where + (i.ref ? " " + i.ref : ""), k: kind(i), run: () => select(i.name), hay: i.title + " " + i.where + " " + i.name }));
+  palItems = [...fromIssues, ...cmds.map((c) => ({ ...c, hay: c.t }))].filter((x) => !q || x.hay.toLowerCase().includes(q));
+  palIndex = Math.min(palIndex, Math.max(palItems.length - 1, 0));
+  $("palList").innerHTML = palItems.length ? palItems.map((x, n) => `
+    <button class="pal-item ${x.k ? "k-" + x.k : ""}" role="option" aria-selected="${n === palIndex}" data-n="${n}">
+      ${x.k ? `<span class="dot ${x.k === "hold" ? "hold" : ""}"></span>` : icon(x.ic)}
+      <span class="t">${x.k ? inline(x.t, "") : esc(x.t)}</span>${x.m ? `<span class="m">${esc(x.m)}</span>` : ""}
+    </button>`).join("") : `<p class="empty-list">No matches.</p>`;
+  $("palList").querySelector("[aria-selected=true]")?.scrollIntoView({ block: "nearest" });
+}
+function runPalette(n) { const x = palItems[n]; if (!x) return; $("palette").close(); x.run(); }
+$("palInput").oninput = () => { palIndex = 0; renderPalette(); };
+$("palInput").onkeydown = (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); palIndex = Math.min(palIndex + 1, palItems.length - 1); renderPalette(); }
+  if (e.key === "ArrowUp") { e.preventDefault(); palIndex = Math.max(palIndex - 1, 0); renderPalette(); }
+  if (e.key === "Enter") { e.preventDefault(); runPalette(palIndex); }
+};
+$("palList").onclick = (e) => { const b = e.target.closest(".pal-item"); if (b) runPalette(+b.dataset.n); };
+$("palette").onclick = (e) => { if (e.target === $("palette")) $("palette").close(); };
+
+// --- wiring ---
+$("searchIcon").outerHTML = icon("search");
+$("palIcon").outerHTML = icon("search");
+$("refresh").innerHTML = icon("refresh");
+$("new").innerHTML = icon("plus");
+$("refresh").onclick = () => load(true);
+$("new").onclick = openNew;
+$("search").oninput = renderList;
+$("search").onkeydown = (e) => {
+  if (e.key === "Enter") { const first = document.querySelector(".row"); if (first) { select(first.dataset.name); $("search").blur(); } }
+  if (e.key === "Escape") { $("search").value = ""; renderList(); $("search").blur(); }
+};
+$("tabs").onclick = (e) => { const t = e.target.closest(".tab"); if (t) { filter = t.dataset.f; renderList(); } };
+$("list").onclick = (e) => { const r = e.target.closest(".row"); if (r) select(r.dataset.name, { scroll: false }); };
+window.addEventListener("hashchange", () => { const n = decodeURIComponent(location.hash.slice(1)); if (n !== (current || "")) select(n || null); });
+window.addEventListener("beforeunload", (e) => { if (dirty) e.preventDefault(); });
+
+document.addEventListener("keydown", (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === "k" && !document.body.classList.contains("setting-up")) { e.preventDefault(); $("palette").open ? $("palette").close() : openPalette(); return; }
+  if (document.querySelector("dialog[open]") || document.body.classList.contains("setting-up")) return;
+  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName);
+  if (e.key === "Escape") {
+    if (!typing && current && !editing && matchMedia("(max-width: 860px)").matches) select(null);
+    return;
+  }
+  if (typing || mod || e.altKey) return;
+  const rows = [...document.querySelectorAll(".row")].map((r) => r.dataset.name);
+  const at = rows.indexOf(current);
+  if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); if (rows.length) select(rows[at < 0 ? 0 : Math.min(at + 1, rows.length - 1)]); }
+  else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); if (rows.length) select(rows[at < 0 ? 0 : Math.max(at - 1, 0)]); }
+  else if (e.key === "/") { e.preventDefault(); $("search").focus(); }
+  else if (e.key === "e") { e.preventDefault(); startEdit(); }
+  else if (e.key === "o") { const i = issues.find((x) => x.name === current); if (i?.url) window.open(i.url, "_blank", "noreferrer"); }
+  else if (e.key === "n") { e.preventDefault(); openNew(); }
+  else if (e.key === "l") { e.preventDefault(); openLink(); }
+});
+
+$("main").addEventListener("click", (e) => { if (e.target.closest("#emptyNew")) openNew(); });
+
+// --- first run: pick the folder, then optionally put it on GitHub ---
+let rootPath = null;
+
+function setupFolder(changing) {
+  if (editing && dirty && !confirm("Discard your unsaved changes?")) return;
+  editing = false; dirty = false;
+  document.body.classList.add("setting-up");
+  $("setup").innerHTML = `<form class="dlg" id="setupForm">
+    <span class="mark">${icon("folder")}</span>
+    <h1>Where should your issues live?</h1>
+    <p>A git repo containing folders/plain files</p>
+    <label class="choice"><span><input type="radio" name="mode" value="new" ${changing ? "" : "checked"}>Start a new folder</span>
+      <input id="newPath" placeholder="~/issues" autocomplete="off" spellcheck="false"></label>
+    <label class="choice"><span><input type="radio" name="mode" value="existing" ${changing ? "checked" : ""}>I already have one</span>
+      <input id="existingPath" placeholder="~/path/to/issues" autocomplete="off" spellcheck="false" value="${changing && rootPath ? esc(rootPath) : ""}">
+      <p class="note" id="found"></p></label>
+    <div class="error" id="setupError"></div>
+    <div class="actions">${changing ? `<button class="btn" type="button" id="setupCancel">Cancel</button>` : ""}<button class="btn primary">Continue</button></div>
+  </form>`;
+  const mode = (m) => document.querySelector(`input[name=mode][value=${m}]`);
+  $("newPath").onfocus = () => { mode("new").checked = true; };
+  $("existingPath").onfocus = () => { mode("existing").checked = true; };
+  let timer;
+  const check = () => api("/api/setup/check", { path: $("existingPath").value }).then((r) => {
+    $("found").textContent = r.count ? `Found ${r.count} issue${r.count === 1 ? "" : "s"}.` : "";
+  }, () => {});
+  $("existingPath").oninput = () => { clearTimeout(timer); timer = setTimeout(check, 250); };
+  if (changing && rootPath) check();
+  if (changing) $("setupCancel").onclick = () => document.body.classList.remove("setting-up");
+  $("setupForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const m = document.querySelector("input[name=mode]:checked").value;
+    try {
+      const r = await api("/api/setup/folder", { mode: m, path: $(m === "new" ? "newPath" : "existingPath").value });
+      const moved = changing && r.root !== rootPath;
+      rootPath = r.root;
+      setupSync(changing, moved);
+    } catch (err) { $("setupError").textContent = err.message; }
+  };
+  (changing ? $("existingPath") : $("newPath")).focus();
+}
+
+async function setupSync(changing, moved) {
+  const finish = async () => {
+    document.body.classList.remove("setting-up");
+    statusOf = {}; current = null; detail = null;
+    await load(false); select(null);
+    if (moved) toast("Now using " + rootPath, "folder");
+  };
+  let info;
+  try { info = await api("/api/setup/sync"); } catch (e) { return finish(); }
+  $("setup").innerHTML = `<form class="dlg" id="syncForm">
+    <span class="mark">${icon("cloud")}</span>
+    <h1>Sync to GitHub?</h1>
+    ${info.remote ? `<p>Already backed up to <code>${esc(info.remote)}</code>.</p>
+      <div class="actions"><button class="btn primary">Continue</button></div>`
+    : `<p>Creates a private repo and pushes your issues to it. You can do this later.</p>
+      ${info.gh ? `<label class="field">Repo name
+          <input id="repoName" placeholder="issues" value="${esc(info.name)}" autocomplete="off" spellcheck="false"></label>`
+        : `<p class="warn">Needs the GitHub CLI. Install gh and run gh auth login, or skip for now.</p>`}
+      <div class="error" id="syncError"></div>
+      <div class="actions"><button class="btn" type="button" id="syncSkip">Skip</button>${info.gh ? `<button class="btn primary" id="syncGo">Create private repo</button>` : ""}</div>`}
+  </form>`;
+  if (!info.remote) $("syncSkip").onclick = finish;
+  $("syncForm").onsubmit = async (e) => {
+    e.preventDefault();
+    if (info.remote) return finish();
+    $("syncGo").disabled = true;
+    try { await api("/api/setup/github", { name: $("repoName").value }); finish(); }
+    catch (err) { $("syncError").textContent = err.message; $("syncGo").disabled = false; }
+  };
+  (info.gh && !info.remote ? $("repoName") : $("setup").querySelector(".btn.primary, #syncSkip"))?.focus();
+}
+
+api("/api/config").then((cfg) => {
+  rootPath = cfg.root;
+  if (!rootPath) return setupFolder(false);
+  load(false).then(() => select(decodeURIComponent(location.hash.slice(1)) || null));
+});
+</script>
+</body>
+</html>

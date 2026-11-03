@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""A local web page for your issues repo.
+
+  iss                  serve the page on 127.0.0.1 and open it
+  iss list             print every issue with its live status
+  iss new NAME         start a draft in NAME/README.md
+  iss delete NAME      delete NAME, after typing its name to confirm
+  iss link NAME URL    add another issue, MR, PR or patch link to NAME
+  iss unlink NAME URL  remove one of NAME's links
+
+Each issue is NAME/README.md, starting with:
+
+  ---
+  url: <issue, MR, PR or patch link, empty while it's a draft>
+  url: <more links, like the MR that fixes the issue>   (optional)
+  hold: true          (optional)
+  ---
+  # Title
+
+The first url sets the issue's status; the others show with their own.
+
+The first run asks where your issues live and remembers it in .config.json
+next to this tool, which git ignores. Statuses aren't stored: the page asks
+every tracker at once and fills each one in as it answers.
+
+The page can edit and delete files, so the server only listens on
+127.0.0.1, only answers requests addressed to it there, and every API call
+must carry a token that's new each run.
+"""
+
+import http.server
+import json
+import mimetypes
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import urllib.parse
+import urllib.request
+import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+PAGE = Path(__file__).resolve().parent / "iss.html"
+# Inside this clone and ignored by git, so nothing is written outside it or your issues
+CONFIG = Path(__file__).resolve().parent.parent / ".config.json"
+ROOT = None  # your issues repo, once setup has picked it
+PORT = 8765
+TEMPLATE = "---\nurl:\n---\n\n# {title}\n"
+NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)+")
+URL = re.compile(r"https?://\S+")
+
+
+class IssError(Exception):
+    pass
+
+
+def front_matter(text):
+    """Fields from the --- block, each a list of values since url: can repeat."""
+    m = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    if not m:
+        return {}, text
+    fields = {}
+    for line in m.group(1).splitlines():
+        key, _, value = line.partition(":")
+        fields.setdefault(key.strip(), []).append(value.strip())
+    return fields, text[m.end():]
+
+
+def issues():
+    for readme in sorted(ROOT.glob("*/README.md")):
+        fields, body = front_matter(readme.read_text())
+        title = next((l[2:] for l in body.splitlines() if l.startswith("# ")), readme.parent.name)
+        urls = [u for u in fields.get("url", []) if u]
+        yield readme.parent.name, urls, "true" in fields.get("hold", []), title
+
+
+def where(url):
+    """Short tracker label: owner/repo, GitLab project path, or the host."""
+    u = urllib.parse.urlparse(url)
+    path = u.path.split("/-/")[0].strip("/")
+    if u.netloc == "github.com":
+        return "/".join(path.split("/")[:2])
+    if "/-/" in u.path:
+        return path
+    return u.netloc
+
+
+def link_type(url):
+    """What the url points at: an issue, an MR, a PR, or a patch sent by email."""
+    u = urllib.parse.urlparse(url)
+    if "/-/merge_requests/" in u.path:
+        return "mr"
+    if u.netloc == "github.com" and "/pull/" in u.path:
+        return "pr"
+    if u.netloc in ("lore.kernel.org", "patchwork.kernel.org", "lists.freedesktop.org"):
+        return "patch"
+    return "issue"
+
+
+def ref(url):
+    """Short reference the way each tracker writes it: #12 for issues and PRs, !12 for MRs."""
+    u = urllib.parse.urlparse(url)
+    if u.path.endswith("show_bug.cgi"):
+        return "bug " + urllib.parse.parse_qs(u.query).get("id", [""])[0]
+    m = re.search(r"/(\d+)/?$", u.path)
+    if not m or link_type(url) == "patch":
+        return ""
+    return ("!" if link_type(url) == "mr" else "#") + m.group(1)
+
+
+def fetch(url):
+    """Live state of an issue, MR or PR, or "?" if the tracker isn't known."""
+    u = urllib.parse.urlparse(url)
+    if link_type(url) == "patch":
+        # A patch on a mailing list has no state to ask for
+        return "sent"
+    try:
+        if u.netloc == "github.com":
+            owner, repo, kind, number = u.path.strip("/").split("/")[:4]
+            kind = "pulls" if kind == "pull" else "issues"
+            data = json.loads(subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo}/{kind}/{number}"],
+                capture_output=True, text=True, check=True, timeout=15).stdout)
+            return "merged" if data.get("merged_at") else data["state"]
+        if "/-/" in u.path:
+            project, rest = u.path.strip("/").split("/-/")
+            kind, number = rest.split("/")[:2]
+            kind = "merge_requests" if kind == "merge_requests" else "issues"
+            api = f"https://{u.netloc}/api/v4/projects/{urllib.parse.quote(project, safe='')}/{kind}/{number}"
+            try:
+                state = get_json(api)["state"]
+            except Exception:
+                # gitlab.gnome.org answers MR API calls with a 406, but serves the page's JSON
+                state = get_json(f"https://{u.netloc}/{project}/-/{kind}/{number}.json?serializer=basic")["state"]
+            return "open" if state == "opened" else state
+        if u.path.endswith("show_bug.cgi"):
+            number = urllib.parse.parse_qs(u.query)["id"][0]
+            bug = get_json(f"https://{u.netloc}/rest/bug/{number}?include_fields=status,resolution")["bugs"][0]
+            return (bug["resolution"] or bug["status"]).lower()
+    except Exception:
+        return "?"
+    return "?"
+
+
+def get_json(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "iss", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
+
+
+def statuses(urls):
+    """Yield (url, status) as each tracker answers, asking them all at once.
+
+    Capped at 64 threads so a huge list doesn't open a thousand connections."""
+    if not urls:
+        return
+    with ThreadPoolExecutor(min(len(urls), 64)) as pool:
+        asked = {pool.submit(fetch, url): url for url in urls}
+        for done in as_completed(asked):
+            yield asked[done], done.result()
+
+
+def table():
+    """Every issue, straight from disk; statuses come separately so nothing waits on a tracker."""
+    link = lambda url: {"url": url, "where": where(url), "status": None,
+                        "type": link_type(url), "ref": ref(url)}
+    return [{
+        "name": name,
+        "url": urls[0] if urls else "",
+        # A draft has no url yet, so show the project from the folder name
+        "where": where(urls[0]) if urls else name.split("-", 1)[0],
+        "status": None if urls else "draft",
+        "type": link_type(urls[0]) if urls else "",
+        "ref": ref(urls[0]) if urls else "",
+        "links": [link(url) for url in urls[1:]],
+        "hold": hold,
+        "title": title,
+    } for name, urls, hold, title in issues()]
+
+
+def all_urls():
+    return {url for _, urls, _, _ in issues() for url in urls}
+
+
+def tilde(path):
+    path = Path(path)
+    return "~/" + str(path.relative_to(Path.home())) if path.is_relative_to(Path.home()) else str(path)
+
+
+def load_config():
+    try:
+        return Path(json.loads(CONFIG.read_text())["root"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def count_issues(folder):
+    return sum(1 for readme in folder.glob("*/README.md")
+               if NAME.fullmatch(readme.parent.name) and readme.read_text(errors="replace").startswith("---\n"))
+
+
+def check_folder(raw):
+    """What setup shows under "I already have one" as you type."""
+    path = Path(os.path.expanduser(raw.strip())) if raw.strip() else None
+    return {"count": count_issues(path) if path and path.is_dir() else 0}
+
+
+def choose_folder(mode, raw):
+    """Setup's first step: make or adopt the folder, make it a git repo, remember it."""
+    global ROOT
+    raw = raw.strip() or ("~/issues" if mode == "new" else "")
+    path = Path(os.path.expanduser(raw)).absolute() if raw else None
+    if mode == "existing" and not (path and path.is_dir()):
+        raise IssError("That folder doesn't exist.")
+    if path.exists():
+        empty = path.is_dir() and not any(not p.name.startswith(".") for p in path.iterdir())
+        if not path.is_dir() or not (empty or count_issues(path)):
+            raise IssError("That doesn't seem right. Pick another folder.")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if not (path / ".git").exists():
+            subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True)
+        CONFIG.write_text(json.dumps({"root": str(path)}, indent=1) + "\n")
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise IssError(f"Couldn't create the folder: {getattr(e, 'strerror', None) or e}")
+    ROOT = path
+    return {"root": tilde(path), "count": count_issues(path)}
+
+
+def sync_info():
+    remote = subprocess.run(["git", "remote", "get-url", "origin"], cwd=ROOT,
+                            capture_output=True, text=True).stdout.strip()
+    gh = bool(shutil.which("gh")) and subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
+    return {"remote": remote or None, "gh": gh, "name": ROOT.name}
+
+
+def create_repo(name):
+    """Setup's second step: a private GitHub repo as origin, pushed if there's anything to push."""
+    name = name.strip() or ROOT.name
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise IssError(f"Couldn't create the repo: {name} isn't a valid name")
+    pushable = subprocess.run(["git", "rev-parse", "-q", "--verify", "HEAD"], cwd=ROOT,
+                              capture_output=True).returncode == 0
+    made = subprocess.run(["gh", "repo", "create", name, "--private", "--source", str(ROOT), "--remote", "origin"]
+                          + (["--push"] if pushable else []), capture_output=True, text=True, timeout=120)
+    if made.returncode:
+        if "already exists" in made.stderr:
+            raise IssError(f"{name} already exists on your account. Pick another name.")
+        raise IssError("Couldn't create the repo: " + (made.stderr.strip().splitlines() or ["gh failed"])[-1])
+    return sync_info()
+
+
+def folder_of(name):
+    if not NAME.fullmatch(name or "") or not (ROOT / name / "README.md").is_file():
+        raise IssError(f"{name} isn't an issue folder")
+    return ROOT / name
+
+
+def loose_files(name):
+    """Files in the folder that git doesn't track, so deleting loses them."""
+    out = subprocess.run(["git", "ls-files", "--others", "-z", "--", name],
+                         cwd=ROOT, capture_output=True, text=True).stdout
+    return [f.removeprefix(name + "/") for f in out.split("\0") if f]
+
+
+def details(name):
+    folder = folder_of(name)
+    files = sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file())
+    return {"name": name, "readme": (folder / "README.md").read_text(),
+            "files": files, "loose": loose_files(name), "path": str(folder)}
+
+
+def new(name):
+    if not NAME.fullmatch(name or ""):
+        raise IssError("use <project>-<slug>, lowercase, like gtk-pen-proximity")
+    folder = ROOT / name
+    if folder.exists():
+        raise IssError(f"{name} already exists")
+    folder.mkdir()
+    (folder / "README.md").write_text(TEMPLATE.format(title=name))
+
+
+def delete(name, typed):
+    folder = folder_of(name)
+    if typed != name:
+        raise IssError("the typed name doesn't match, nothing was deleted")
+    if subprocess.run(["git", "ls-files", "--", name], cwd=ROOT,
+                      capture_output=True, text=True).stdout.strip():
+        subprocess.run(["git", "rm", "-r", "-q", "--", name], cwd=ROOT, check=True)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def save(name, text):
+    (folder_of(name) / "README.md").write_text(text)
+
+
+def urls_of(name):
+    fields, _ = front_matter((folder_of(name) / "README.md").read_text())
+    return [u for u in fields.get("url", []) if u]
+
+
+def set_urls(name, urls):
+    """Rewrite the url: lines where the first one was, leaving the rest of the README alone."""
+    readme = folder_of(name) / "README.md"
+    text = readme.read_text()
+    m = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    lines = m.group(1).splitlines() if m else []
+    is_url = lambda line: line.partition(":")[0].strip() == "url"
+    at = next((n for n, line in enumerate(lines) if is_url(line)), 0)
+    lines = [line for line in lines if not is_url(line)]
+    lines[at:at] = [f"url: {u}" for u in urls] or ["url:"]
+    body = text[m.end():] if m else "\n" + text
+    readme.write_text("---\n" + "\n".join(lines) + "\n---\n" + body)
+
+
+def link(name, url):
+    """Add a link: the first one files a draft, later ones show next to it."""
+    if not URL.fullmatch(url or ""):
+        raise IssError("paste a full http(s) link")
+    urls = urls_of(name)
+    if url in urls:
+        raise IssError("that link is already there")
+    set_urls(name, urls + [url])
+
+
+def unlink(name, url):
+    urls = urls_of(name)
+    if url not in urls:
+        raise IssError("that link isn't there")
+    set_urls(name, [u for u in urls if u != url])
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    token = ""
+    port = PORT
+
+    def log_message(self, format, *args):
+        pass
+
+    def reply(self, code, body, kind="application/json"):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def allowed(self, api):
+        # Only answer requests addressed to this server, which stops DNS rebinding
+        if self.headers.get("Host") not in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+            self.reply(403, {"error": "wrong host"})
+            return False
+        if api and not secrets.compare_digest(self.headers.get("X-Iss-Token", ""), self.token):
+            self.reply(403, {"error": "missing token, reload the page"})
+            return False
+        return True
+
+    def body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    def do_GET(self):
+        url = urllib.parse.urlparse(self.path)
+        parts = [urllib.parse.unquote(p) for p in url.path.strip("/").split("/")]
+        if url.path == "/":
+            if self.allowed(False):
+                self.reply(200, PAGE.read_text().replace("__TOKEN__", self.token).encode(),
+                           "text/html; charset=utf-8")
+            return
+        if parts[0] == "file" and len(parts) >= 3:
+            # Attachments and images in READMEs; the path can't leave the issue folder
+            if not self.allowed(False):
+                return
+            if ROOT is None:
+                return self.reply(404, {"error": "no such file"})
+            try:
+                folder = folder_of(parts[1]).resolve()
+                target = (folder / "/".join(parts[2:])).resolve()
+                if folder not in target.parents or not target.is_file():
+                    raise IssError("no such file")
+            except IssError as e:
+                return self.reply(404, {"error": str(e)})
+            kind = mimetypes.guess_type(target.name)[0] or "text/plain; charset=utf-8"
+            if kind.startswith("text/") and "charset" not in kind:
+                kind += "; charset=utf-8"
+            return self.reply(200, target.read_bytes(), kind)
+        if not self.allowed(True):
+            return
+        if parts == ["api", "config"]:
+            return self.reply(200, {"root": tilde(ROOT) if ROOT else None})
+        if ROOT is None:
+            return self.reply(409, {"error": "Pick where your issues live first."})
+        try:
+            if parts == ["api", "setup", "sync"]:
+                return self.reply(200, sync_info())
+            if parts == ["api", "issues"]:
+                return self.reply(200, table())
+            if parts[:2] == ["api", "issue"] and len(parts) == 3:
+                return self.reply(200, details(parts[2]))
+        except IssError as e:
+            return self.reply(400, {"error": str(e)})
+        self.reply(404, {"error": "not found"})
+
+    def do_POST(self):
+        if not self.allowed(True):
+            return
+        parts = self.path.strip("/").split("/")
+        try:
+            data = self.body()
+            if parts == ["api", "setup", "check"]:
+                return self.reply(200, check_folder(data.get("path", "")))
+            if parts == ["api", "setup", "folder"]:
+                return self.reply(200, choose_folder(data.get("mode", "new"), data.get("path", "")))
+            if ROOT is None:
+                return self.reply(409, {"error": "Pick where your issues live first."})
+            if parts == ["api", "setup", "github"]:
+                return self.reply(200, create_repo(data.get("name", "")))
+            if parts == ["api", "statuses"]:
+                return self.stream_statuses(data.get("urls", []))
+            if parts == ["api", "new"]:
+                new(data.get("name", "").strip())
+            elif parts == ["api", "save"]:
+                save(data.get("name", ""), data.get("readme", ""))
+            elif parts == ["api", "delete"]:
+                delete(data.get("name", ""), data.get("typed", ""))
+            elif parts == ["api", "link"]:
+                link(data.get("name", ""), data.get("url", "").strip())
+            elif parts == ["api", "unlink"]:
+                unlink(data.get("name", ""), data.get("url", ""))
+            elif parts == ["api", "open-folder"]:
+                subprocess.Popen(["xdg-open", str(folder_of(data.get("name", "")))],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                return self.reply(404, {"error": "not found"})
+        except IssError as e:
+            return self.reply(400, {"error": str(e)})
+        except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            return self.reply(500, {"error": str(e)})
+        self.reply(200, {"ok": True})
+
+    def stream_statuses(self, urls):
+        """One line of JSON per url, sent the moment its tracker answers."""
+        known = all_urls()
+        urls = [u for u in dict.fromkeys(urls) if isinstance(u, str) and u in known]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            for url, state in statuses(urls):
+                self.wfile.write((json.dumps({"url": url, "status": state}) + "\n").encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the page went away, e.g. a reload
+
+
+def serve():
+    global ROOT
+    if ROOT and not ROOT.is_dir():
+        print(f"iss: can't find your issues at {tilde(ROOT)}, opening setup again", flush=True)
+        ROOT = None
+    Handler.token = secrets.token_urlsafe(24)
+    for port in range(PORT, PORT + 20):
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError:
+            continue
+    else:
+        sys.exit(f"iss: ports {PORT}-{PORT + 19} are all busy")
+    Handler.port = port
+    url = f"http://127.0.0.1:{port}/"
+    print(f"iss: {'setting up at ' if ROOT is None else ''}{url}  (ctrl-c to stop)", flush=True)
+    threading.Timer(0.3, webbrowser.open, (url,)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\niss: stopped")
+    finally:
+        server.server_close()
+
+
+def main(argv):
+    global ROOT
+    ROOT = load_config()
+    if argv and not (ROOT and ROOT.is_dir()):
+        sys.exit("iss: run iss first to pick where your issues live")
+    try:
+        if not argv:
+            serve()
+        elif argv[0] == "list":
+            rows = table()
+            live = dict(statuses(sorted({url for row in rows for url in [row["url"]] + [l["url"] for l in row["links"]] if url})))
+            for row in rows:
+                row["status"] = live.get(row["url"], row["status"])
+                for l in row["links"]:
+                    l["status"] = live[l["url"]]
+                status = row["status"] + (", hold" if row["hold"] else "")
+                also = "".join(f"  + {l['ref'] or l['where']} {l['status']}" for l in row["links"])
+                print(f"{row['where']:<22.22} {status:<12} {row['title']}{also}")
+        elif argv[0] == "new" and len(argv) == 2:
+            new(argv[1])
+            print(f"iss: started {argv[1]}/README.md")
+        elif argv[0] == "delete" and len(argv) == 2:
+            info = details(argv[1])
+            if info["loose"]:
+                print(f"not in git, gone for good: {', '.join(info['loose'])}")
+            delete(argv[1], input(f"type {argv[1]} to delete it: ").strip())
+            print(f"iss: deleted {argv[1]}")
+        elif argv[0] in ("link", "unlink") and len(argv) == 3:
+            (link if argv[0] == "link" else unlink)(argv[1], argv[2])
+            print(f"iss: {argv[0]}ed {argv[2]}")
+        else:
+            sys.exit(__doc__)
+    except IssError as e:
+        sys.exit(f"iss: {e}")
+    except (KeyboardInterrupt, EOFError):
+        print()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
