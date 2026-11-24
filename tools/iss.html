@@ -105,8 +105,10 @@
   .row .dot { margin-top: 7px; }
   .row .t { font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2;
             -webkit-box-orient: vertical; overflow: hidden; }
-  .row .m { grid-column: 2; margin-top: 3px; font: 12px var(--mono); color: var(--muted); overflow: hidden;
+  .row .m { grid-column: 2; margin-top: 3px; font: 12px var(--mono); color: var(--faint); overflow: hidden;
             text-overflow: ellipsis; white-space: nowrap; }
+  /* Below the title: the project in bold, its refs a step dimmer */
+  .row .m .p { color: var(--muted); font-weight: 600; }
   .row code, .title code, .pal-item code { font: .9em var(--mono); background: var(--code); padding: 0 4px; border-radius: 4px; }
   .empty-list { color: var(--muted); padding: 40px 16px; text-align: center; font-size: 13px; }
 
@@ -428,8 +430,10 @@ const groupOf = (i) => (kind(i) === "unknown" || kind(i) === "loading" ? "open" 
 const TYPE = { mr: "MR", pr: "PR", patch: "patch" };
 const typeTag = (i) => TYPE[i.type] ? `<span class="tag">${TYPE[i.type]}</span>` : "";
 // Linked items in the same project show just their ref, others their project too
-const short = (l, i) => l.where === i.where && l.ref ? l.ref : l.where + (l.ref ? " " + l.ref : "");
-const where = (i) => esc(i.where) + (i.ref ? " " + esc(i.ref) : "") + i.links.map((l) => " · " + esc(short(l, i))).join("");
+// The project stands out from its refs; a link elsewhere keeps its ref next to its own project
+const project = (w) => `<span class="p">${esc(w)}</span>`;
+const short = (l, i) => l.where === i.where && l.ref ? esc(l.ref) : project(l.where) + (l.ref ? " " + esc(l.ref) : "");
+const where = (i) => [project(i.where), i.ref && esc(i.ref), ...i.links.map((l) => short(l, i))].filter(Boolean).join(" · ");
 const label = (i) => i.hold ? (i.status === "draft" ? "on hold" : i.status + " · hold") : i.status === "?" ? "unknown" : i.status;
 
 // --- sidebar ---
@@ -925,7 +929,7 @@ function renderPalette() {
     { t: "Change issues folder", ic: "folder", run: () => setupFolder(true) },
     { t: view === "preview" ? "Show README source" : "Show README preview", ic: "code", run: () => setView(view === "preview" ? "source" : "preview") },
   ];
-  const fromIssues = issues.map((i) => ({ t: i.title, m: i.where + (i.ref ? " " + i.ref : ""), k: kind(i), run: () => select(i.name), hay: i.title + " " + i.where + " " + i.name }));
+  const fromIssues = issues.map((i) => ({ t: i.title, m: i.where + (i.ref ? " · " + i.ref : ""), k: kind(i), run: () => select(i.name), hay: i.title + " " + i.where + " " + i.name }));
   palItems = [...fromIssues, ...cmds.map((c) => ({ ...c, hay: c.t }))].filter((x) => !q || x.hay.toLowerCase().includes(q));
   palIndex = Math.min(palIndex, Math.max(palItems.length - 1, 0));
   $("palList").innerHTML = palItems.length ? palItems.map((x, n) => `
